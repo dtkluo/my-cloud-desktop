@@ -1,0 +1,75 @@
+﻿name: Diagnose EasyTier Connectivity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 1. Runner 网络信息
+        run: |
+          echo "===== Runner 公网 IP ====="
+          curl -s --max-time 10 https://api.ipify.org || echo "获取失败"
+          echo ""
+
+      - name: 2. 测试节点 DNS 与 TCP 连通性
+        run: |
+          for host in south.koljs.dpdns.org mp.koljs.dpdns.org; do
+            echo "===== DNS: $host ====="
+            getent hosts $host || echo "DNS 解析失败"
+            for port in 11010 11014; do
+              echo "--- TCP $host:$port ---"
+              (timeout 8 bash -c "echo > /dev/tcp/$host/$port" && echo "TCP OK") || echo "TCP FAILED"
+            done
+          done
+
+      - name: 3. 安装 EasyTier
+        run: |
+          release=$(curl -s https://api.github.com/repos/EasyTier/EasyTier/releases/latest)
+          echo "$release" | grep -o '"tag_name": *"[^"]*"' | head -1
+          url=$(echo "$release" | grep -o '"browser_download_url": *"[^"]*linux-x86_64[^"]*\.zip"' | head -1 | sed 's/.*"browser_download_url": *"\([^"]*\)"/\1/')
+          echo "下载: $url"
+          curl -sL "$url" -o /tmp/et.zip
+          cd /tmp && unzip -o et.zip -d easytier
+          find /tmp/easytier -name "easytier-core" -o -name "easytier-cli" | head -5
+
+      - name: 4. 查看 EasyTier 可用参数
+        run: |
+          CORE=$(find /tmp/easytier -name "easytier-core" | head -1)
+          $CORE --help 2>&1 || true
+
+      - name: 5. 加入网络并检查节点
+        env:
+          ET_SECRET: ${{ secrets.EASYTIER_SECRET }}
+        run: |
+          CORE=$(find /tmp/easytier -name "easytier-core" | head -1)
+          CLI=$(find /tmp/easytier -name "easytier-cli" | head -1)
+          chmod +x $CORE $CLI
+          echo "启动 EasyTier 诊断节点..."
+          sudo $CORE -i 192.168.110.99 --network-name koljs --network-secret "$ET_SECRET" --hostname gh-diagnose \
+            -p tcp://south.koljs.dpdns.org:11010 \
+            -p udp://south.koljs.dpdns.org:11010 \
+            -p tcp://mp.koljs.dpdns.org:11010 \
+            -p udp://mp.koljs.dpdns.org:11010 \
+            -p tcp://south.koljs.dpdns.org:11014 \
+            -p udp://south.koljs.dpdns.org:11014 \
+            > /tmp/et-diag.log 2>&1 &
+          sleep 75
+          echo "===== 云桌面 .88 连通性测试 ====="
+          sudo ping -c 5 -W 3 192.168.110.88 || true
+          echo ""
+          echo "===== peer 列表（第 1 次采样）====="
+          sudo $CLI peer || true
+          sleep 60
+          echo ""
+          echo "===== peer 列表（第 2 次采样）====="
+          sudo $CLI peer || true
+          echo ""
+          echo "===== route 表 ====="
+          sudo $CLI route || true
+          echo ""
+          echo "===== 全局节点列表 ====="
+          sudo $CLI global-node || true
