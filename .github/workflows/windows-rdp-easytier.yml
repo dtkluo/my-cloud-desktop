@@ -107,7 +107,7 @@ jobs:
           $secret = $env:ET_SECRET
           $hostname = $env:ET_HOSTNAME
           $peerList = $env:ET_PEERS -split '\s+-p\s+' | Where-Object { $_ -match '://' } | ForEach-Object { $_.Trim() }
-          $argList = @("-i", $vip, "--network-name", $netName, "--network-secret", $secret, "--hostname", $hostname, "--enable-kcp-proxy")
+          $argList = @("-i", $vip, "--network-name", $netName, "--network-secret", $secret, "--hostname", $hostname, "--enable-kcp-proxy", "--enable-exit-node")
           foreach ($p in $peerList) { $argList += "-p"; $argList += $p }
 
           $proc = Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru -RedirectStandardOutput "C:\easytier\out.log" -RedirectStandardError "C:\easytier\err.log"
@@ -175,7 +175,7 @@ jobs:
           $secret = $env:ET_SECRET
           $hostname = $env:ET_HOSTNAME
           $peerList = $env:ET_PEERS -split '\s+-p\s+' | Where-Object { $_ -match '://' } | ForEach-Object { $_.Trim() }
-          $argList = @("-i", $vip, "--network-name", $netName, "--network-secret", $secret, "--hostname", $hostname, "--enable-kcp-proxy")
+          $argList = @("-i", $vip, "--network-name", $netName, "--network-secret", $secret, "--hostname", $hostname, "--enable-kcp-proxy", "--enable-exit-node")
           foreach ($p in $peerList) { $argList += "-p"; $argList += $p }
 
           $hours = [int]"${{ github.event.inputs.session_hours }}"
