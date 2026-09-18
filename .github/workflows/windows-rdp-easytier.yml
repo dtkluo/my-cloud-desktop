@@ -145,7 +145,37 @@ jobs:
             exit 1
           }
 
-      - name: 6. 防火墙限制 RDP 仅 EasyTier 网段
+      - name: 6. 开启 IP 转发与 NAT（出口节点流量转发）
+        run: |
+          $vip = $env:ET_VIRTUAL_IP
+          $octets = $vip.Split('.')
+          $subnet = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+
+          # 出口节点原理：EasyTier 把目的地为外网的包写入 TUN 网卡，
+          # 需要系统开启 IP 转发（TUN -> 物理网卡）并提供 NAT（源地址转换）
+          Set-NetIPInterface -Forwarding Enabled -ErrorAction SilentlyContinue
+
+          $fwCount = (Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.Forwarding -eq 'Enabled' } | Measure-Object).Count
+          if ($fwCount -lt 1) {
+            Write-Error "未能开启 IP 转发，出口节点将无法转发流量"
+            exit 1
+          }
+          Write-Host "IP 转发已开启（$fwCount 个 IPv4 接口）"
+
+          $existingNat = Get-NetNat -ErrorAction SilentlyContinue | Where-Object { $_.InternalIPInterfaceAddressPrefix -eq $subnet }
+          if (-not $existingNat) {
+            New-NetNat -Name "EasyTierExitNAT" -InternalIPInterfaceAddressPrefix $subnet | Out-Null
+          }
+          Start-Sleep -Seconds 2
+          $nat = Get-NetNat -Name "EasyTierExitNAT" -ErrorAction SilentlyContinue
+          if (-not $nat) {
+            Write-Error "NAT 创建失败（网段 $subnet），出口流量无法回包"
+            exit 1
+          }
+          Write-Host "NAT 已就绪：EasyTierExitNAT -> $subnet"
+          Write-Host "出口节点转发链路：手机 -> EasyTier TUN -> [IP转发] -> [NAT] -> 物理网卡 -> 互联网"
+
+      - name: 7. 防火墙限制 RDP 仅 EasyTier 网段
         run: |
           $vip = $env:ET_VIRTUAL_IP
           $octets = $vip.Split('.')
@@ -162,7 +192,7 @@ jobs:
           Write-Host "  连接方式      : mstsc → 输入 $vip" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
 
-      - name: 7. 保活运行（含 EasyTier 看门狗）
+      - name: 8. 保活运行（含 EasyTier 看门狗）
         env:
           ET_SECRET: ${{ secrets.EASYTIER_SECRET }}
         run: |
