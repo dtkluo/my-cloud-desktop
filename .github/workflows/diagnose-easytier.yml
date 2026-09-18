@@ -73,3 +73,48 @@ jobs:
           echo ""
           echo "===== 全局节点列表 ====="
           sudo $CLI global-node || true
+
+      - name: 6. 出口节点端到端测试（经 .88 转发访问外网）
+        env:
+          ET_SECRET: ${{ secrets.EASYTIER_SECRET }}
+        run: |
+          CORE=$(find /tmp/easytier -name "easytier-core" | head -1)
+          CLI=$(find /tmp/easytier -name "easytier-cli" | head -1)
+          # 停掉上一步未配置出口的实例，重启为「客户端」模式：--exit-nodes 指向云桌面 .88
+          sudo pkill -f easytier-core || true
+          sleep 3
+          sudo $CORE -i 192.168.110.99 --network-name koljs --network-secret "$ET_SECRET" --hostname gh-diag-exit-client \
+            --exit-nodes 192.168.110.88 \
+            -p tcp://south.koljs.dpdns.org:11010 \
+            -p udp://south.koljs.dpdns.org:11010 \
+            -p tcp://mp.koljs.dpdns.org:11010 \
+            -p udp://mp.koljs.dpdns.org:11010 \
+            > /tmp/et-exit.log 2>&1 &
+          sleep 60
+          echo "===== 当前路由表（应出现默认路由指向 EasyTier TUN）====="
+          ip route || true
+          echo ""
+          echo "===== peer / route ====="
+          sudo $CLI peer || true
+          sudo $CLI route || true
+          echo ""
+          echo "===== 测试 A：纯 IP 访问（绕过 DNS，验证转发链路）====="
+          curl -s -o /dev/null -w "http://1.1.1.1 -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 15 http://1.1.1.1 || echo "1.1.1.1 FAILED（转发链路不通或部分不通）"
+          curl -s -o /dev/null -w "http://8.8.8.8 -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 15 http://8.8.8.8 || echo "8.8.8.8 FAILED"
+          echo ""
+          echo "===== 测试 B：DNS 解析（经出口节点）====="
+          nslookup -timeout=10 google.com 8.8.8.8 2>&1 || true
+          echo ""
+          echo "===== 测试 C：完整 HTTPS 访问（明确走 8.8.8.8 DNS，模拟正确 DNS 配置）====="
+          curl -s -o /dev/null -w "https://www.google.com (DNS 8.8.8.8) -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 20 --dns-servers 8.8.8.8 https://www.google.com 2>/dev/null || curl -s -o /dev/null -w "https://www.google.com -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 20 https://www.google.com || echo "google.com FAILED"
+          echo ""
+          echo "===== 测试 D：HTTPS 访问（系统默认 DNS，模拟 DNS 配置异常）====="
+          curl -s -o /dev/null -w "https://www.google.com (系统 DNS) -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 20 https://www.google.com || echo "系统 DNS 方式 FAILED"
+          echo ""
+          echo "===== 抓包 15 秒观察 TUN 流量（外网目的地）====="
+          TUNIF=$(ip -o link show | awk -F': ' '$2 ~ /^tun/ {print $2; exit}')
+          echo "TUN 接口：${TUNIF:-未找到}"
+          if [ -n "$TUNIF" ]; then sudo timeout 15 tcpdump -ni "$TUNIF" 'dst 1.1.1.1 or dst 8.8.8.8 or icmp' 2>&1 | head -20 || true; fi
+          echo ""
+          echo "===== EasyTier 日志（最后 40 行）====="
+          tail -40 /tmp/et-exit.log || true
