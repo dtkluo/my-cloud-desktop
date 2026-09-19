@@ -1,38 +1,50 @@
 name: Windows Cloud RDP (EasyTier Secure)
 
 # ============================================================================
-# v6 修复说明（相对 v5，2 处关键改动）
+# v7 变更（相对 v6：落地「方案 A —— 内置 SOCKS5 门户」）
 # ----------------------------------------------------------------------------
-# 【v5 为何失败】v5 把「启动 EasyTier」(第5步) 与「出口节点自检」(第6步) 拆成两步。
-#   实测证据（run 35434903902，commit f094091f）：
-#     - 第5步 09:31:11 成功（发现 5 个节点）
-#     - 第6步 09:31:17 三个 easytier-cli 调用全部 stdout 为空
-#   本地对 v2.6.4 实测：RPC 端口不可达时，easytier-cli 正是「stdout 空 + stderr 报错 +
-#   退出码 1」。即第6步执行时 easytier-core 已经不在。
-#   旁证：历史成功运行 run 35361540652 的保活步骤日志中有一行
-#     "[1] 检测到 EasyTier 进程退出，重新启动..." —— 说明第5步启动的核心进程
-#     在该步骤结束时即被回收，看门狗 60 秒后才发现并重启。
-#   而 GitHub 的 pwsh 包装器会在脚本末尾追加 `exit $LASTEXITCODE`，
-#   最后一条原生命令退出码为 1 ⇒ 整个步骤被判定失败（"Process completed with exit code 1"）。
+# 【为什么要改】v6 的出口节点方案要求客户端把 0.0.0.0/0 送进隧道。在 Windows
+#   客户端上这条路被 EasyTier 自身的 metric 实现卡死：
+#     easytier/src/common/ifcfg/windows.rs:201  ->  metric: cost.unwrap_or(9000)
+#   物理网卡默认路由 metric ≈ 35，虚拟网卡 = 5 + 9000 = 9005；两者目的前缀同为
+#   0.0.0.0/0 → 最长前缀不分胜负 → 退化为比 metric → 物理网卡永远胜出 →
+#   流量根本不进隧道。（Android 走 VPNService 的 per-app 路由，不受此机制影响。）
 #
-# 【v6 改动】
-#   [1] 把「启动 → 自检 → 保活」合并进同一个步骤（原5/6/7/8步），
-#       easytier-core 由该步骤自己拉起、自己持有、自己看护，不再跨步骤存活。
-#   [2] 所有诊断性调用改为「非致命」：捕获 stderr（原写法 2>$null 把关键报错丢掉了）、
-#       打印退出码、并复位 $LASTEXITCODE，末尾显式 exit 0。
-#       只有「核心起不来」才让作业失败。
+# 【SOCKS5 门户为什么能绕开】
+#   1) 客户端【不设】0.0.0.0/0，只保留 EasyTier 自动下发的 192.168.110.0/24
+#      直连路由。该前缀比 0.0.0.0/0 更具体，按最长前缀匹配必胜，与 metric 无关；
+#   2) 应用把流量交给 socks5h://192.168.110.88:1080，由出口节点代为出网。
+#      附带好处：socks5h（远端解析）让 DNS 也在出口节点侧解析，
+#      天然规避本地 DNS 污染 —— 这就是"手机设私人 DNS 才能通"的那半个问题。
 #
-# 【出口节点方案（自 v4 起保持）】
-#   出口节点使用内置用户态 TCP/UDP/ICMP 代理：未传 --proxy-forward-by-system
-#   ⇒ gateway.rs 的 should_start() = true ⇒ 代理引擎启动，出口流量由 easytier-core
-#   以本机协议栈重连真实目的地址。因此【不需要】系统 IP 转发，【不需要】 NetNAT。
-#   旧版第6步的 New-NetNat -InternalIPInterfaceAddressPrefix 192.168.110.0/24
-#   与 EasyTier 虚拟网段完全重叠，反而会让 WinNAT 把 Wintun TUN 误当 internal 接口。
+# 【参数核实（源码，非猜测）】
+#   easytier/src/core.rs  NetworkOptions:
+#     #[cfg(feature = "socks5")]
+#     #[arg(long, env = "ET_SOCKS5", help = ...)]  socks5: Option<u16>,
+#     merge_into(): cfg.set_socks5_portal(Some(format!("socks5://0.0.0.0:{port}")))
+#   => 只有一个端口参数；监听地址硬编码 0.0.0.0，无独立绑定地址参数。
+#   easytier/Cargo.toml  [features] default 列表【包含 "socks5"】
+#   => 官方 release 二进制必然带 --socks5，无需自编译。
+#   gateway/socks5/adapter.rs：SOCKS5 目的地经节点自身数据平面 connect_tcp()
+#   建立，无目的地白名单，任意目标地址均放行。
 #
-# 【客户端（手机）配置】
-#   出口节点      : 192.168.110.88      <- 保留
-#   自定义路由    : 0.0.0.0/0            <- 保留（负责把流量送进隧道）
-#   改完断开重连。验证：手机访问 https://api.ipify.org 应显示云桌面的公网 IP。
+# 【安全】监听地址硬编码 0.0.0.0，命令行无法收窄，故用 Windows 防火墙限定
+#   仅 192.168.110.0/24 可入站访问 1080 端口。
+#
+# 【自检】新增端到端验证：在 runner 上执行
+#   curl --socks5-hostname 127.0.0.1:1080 https://api.ipify.org
+#   必须返回出口节点自身的公网 IP，证明门户链路真的能出网（而非仅端口在听）。
+#
+# 【客户端配置（方案 A）】
+#   出口节点   : 留空          <- 不要再填 192.168.110.88（除非要同时保留旧路径）
+#   自定义路由 : 留空          <- 关键！不要再填 0.0.0.0/0
+#   代理       : SOCKS5 / socks5h  ->  192.168.110.88:1080
+#   改完断开重连组织网络，随后把浏览器/客户端代理指向上述地址即可。
+#
+# 【v6 保留项】单步骤持有 easytier-core（启动→就绪→自检→保活同一步骤内），
+#   避免核心进程跨步骤被回收；诊断全部非致命。
+# 【v5/v4 保留项】出口节点使用内置用户态代理，不需要系统 IP 转发，
+#   不需要 NetNAT（旧版与之重叠的 NetNAT 会被本工作流主动清理）。
 # ============================================================================
 
 on:
@@ -47,6 +59,7 @@ env:
   ET_VIRTUAL_IP: 192.168.110.88
   ET_NETWORK_NAME: koljs
   ET_HOSTNAME: github-rdp-easytier
+  ET_SOCKS5_PORT: 1080
   ET_PEERS: >-
     -p tcp://south.koljs.dpdns.org:11010
     -p udp://south.koljs.dpdns.org:11010
@@ -104,6 +117,7 @@ jobs:
         shell: pwsh
         env:
           GH_API_TOKEN: ${{ github.token }}
+          ET_SOCKS5_PORT: ${{ env.ET_SOCKS5_PORT }}
         run: |
           Write-Host "正在获取 EasyTier 最新版本..."
           $release = Invoke-RestMethod "https://api.github.com/repos/EasyTier/EasyTier/releases/latest" -UseBasicParsing -Headers @{ Authorization = "Bearer $env:GH_API_TOKEN" }
@@ -131,7 +145,7 @@ jobs:
 
           Write-Host "===== 关键参数语义自检 ====="
           $helpText = & $coreExe.FullName --help 2>&1 | Out-String
-          $need = @("enable-exit-node", "exit-nodes", "manual-routes", "proxy-forward-by-system", "proxy-networks")
+          $need = @("enable-exit-node", "exit-nodes", "manual-routes", "proxy-forward-by-system", "proxy-networks", "socks5")
           foreach ($k in $need) {
             if ($helpText -match [regex]::Escape($k)) { Write-Host "  [OK]   --$k" }
             else { Write-Host "  [MISS] --$k（当前版本不支持，请核对 EasyTier 版本）" }
@@ -140,29 +154,40 @@ jobs:
             Write-Error "当前 EasyTier 版本不支持 --enable-exit-node，出口节点方案无法生效，终止。"
             exit 1
           }
+          # 方案 A 完全依赖 SOCKS5 门户：socks5 在 Cargo.toml 的 default features 中，
+          # 官方 release 必然支持；若此处 MISS，说明版本异常，直接终止以免"假成功"。
+          if ($helpText -notmatch "socks5") {
+            Write-Error "当前 EasyTier 版本不支持 --socks5，方案 A（SOCKS5 门户）无法生效，终止。"
+            exit 1
+          }
+          Write-Host "SOCKS5 门户参数可用，方案 A 前置条件满足。"
 
       # ======================================================================
-      # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 就绪校验 -> 出口节点自检 -> 保活
+      # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 就绪校验 -> 自检 -> 保活
       # 单步骤持有 easytier-core，避免核心进程在步骤结束时被回收（v5 失败根因）。
+      # [v7] 在启动参数中加入 --socks5 $ET_SOCKS5_PORT，并新增门户端到端自检。
       # ======================================================================
-      - name: 5. 启动 EasyTier + 出口节点自检 + 保活（单一步骤内完成）
+      - name: 5. 启动 EasyTier + 出口/SOCKS5 自检 + 保活（单一步骤内完成）
         shell: pwsh
         env:
           ET_SECRET: ${{ secrets.EASYTIER_SECRET }}
+          ET_SOCKS5_PORT: ${{ env.ET_SOCKS5_PORT }}
         run: |
           $ErrorActionPreference = 'Continue'
           $ProgressPreference    = 'SilentlyContinue'
 
           # ---------- 全局取值 ----------
-          $vip      = $env:ET_VIRTUAL_IP
-          $netName  = $env:ET_NETWORK_NAME
-          $secret   = $env:ET_SECRET
-          $hostname = $env:ET_HOSTNAME
-          $octets   = $vip.Split('.')
-          $subnet   = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
-          $hours    = [int]"${{ github.event.inputs.session_hours }}"
+          $vip         = $env:ET_VIRTUAL_IP
+          $netName     = $env:ET_NETWORK_NAME
+          $secret      = $env:ET_SECRET
+          $hostname    = $env:ET_HOSTNAME
+          $socks5Port  = [int]$env:ET_SOCKS5_PORT
+          $octets      = $vip.Split('.')
+          $subnet      = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+          $hours       = [int]"${{ github.event.inputs.session_hours }}"
 
           if (-not $secret) { Write-Error "未配置 EASYTIER_SECRET"; exit 1 }
+          if ($socks5Port -lt 1 -or $socks5Port -gt 65535) { Write-Error "ET_SOCKS5_PORT 非法：$socks5Port"; exit 1 }
 
           $coreExe  = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-core.exe" | Select-Object -First 1
           $cliExe   = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-cli.exe"  | Select-Object -First 1
@@ -205,12 +230,19 @@ jobs:
           }
 
           # ---------- A. 防火墙（先做完，后续不再依赖独立步骤） ----------
-          Write-Host "===== A. 防火墙：RDP 仅允许来自 EasyTier 网段 ====="
+          Write-Host "===== A. 防火墙：RDP 与 SOCKS5 均只允许来自 EasyTier 网段 ====="
           Disable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           Remove-NetFirewallRule  -DisplayName "RDP-EasyTier-Only" -ErrorAction SilentlyContinue
           New-NetFirewallRule -DisplayName "RDP-EasyTier-Only" -Direction Inbound -Protocol TCP `
             -LocalPort 3389 -Action Allow -RemoteAddress $subnet | Out-Null
-          Write-Host "已限制：RDP 仅允许 $subnet"
+          Write-Host "已限制：RDP(3389) 仅允许 $subnet"
+
+          # SOCKS5 监听地址在源码层被硬编码为 0.0.0.0，命令行无法收窄，
+          # 因此这里用防火墙把入站来源限定在虚拟网段内。
+          Remove-NetFirewallRule -DisplayName "EasyTier-SOCKS5" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "EasyTier-SOCKS5" -Direction Inbound -Protocol TCP `
+            -LocalPort $socks5Port -Action Allow -RemoteAddress $subnet | Out-Null
+          Write-Host "已限制：SOCKS5($socks5Port) 仅允许 $subnet 入站"
 
           # ---------- B. 清理历史遗留的错误 NetNAT ----------
           Write-Host ""
@@ -230,12 +262,13 @@ jobs:
 
           # ---------- C. 启动 EasyTier ----------
           Write-Host ""
-          Write-Host "===== C. 启动 EasyTier（出口节点）====="
+          Write-Host "===== C. 启动 EasyTier（出口节点 + SOCKS5 门户）====="
           $argList = @("-i", $vip, "--network-name", $netName, "--network-secret", $secret, "--hostname", $hostname,
-                       "--enable-kcp-proxy", "--enable-exit-node")
+                       "--enable-kcp-proxy", "--enable-exit-node", "--socks5", "$socks5Port")
           foreach ($p in $peerList) { $argList += "-p"; $argList += $p }
           Write-Host ("启动参数：" + ($argList -join ' '))
-          Write-Host "要点：--enable-exit-node 已启用；未指定默认路由；无系统转发 / 无 NetNAT 依赖。"
+          Write-Host "要点：--enable-exit-node 保留（兼容旧客户端）；--socks5 $socks5Port 为方案 A 主通道；"
+          Write-Host "      未指定默认路由；无系统转发 / 无 NetNAT 依赖。"
 
           $proc = Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru `
                     -RedirectStandardOutput $outLog -RedirectStandardError $errLog
@@ -282,7 +315,7 @@ jobs:
           if ($stable) { Write-Host "OK：核心进程持续存活，RPC 可达（节点数 $(Get-EtPeerCount -CliPath $cliPath)）" }
           else { Show-CoreLogs -Out $outLog -Err $errLog -Tail 40 }
 
-          # ---------- E. 出口节点自检（全部非致命） ----------
+          # ---------- E. 出口节点 + SOCKS5 门户自检（全部非致命） ----------
           Write-Host ""
           Write-Host "===== E. 出口节点自检 ====="
 
@@ -300,7 +333,7 @@ jobs:
           Write-Host "--- 本机（出口节点）出网能力与公网 IP ---"
           try {
             $wanIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -TimeoutSec 20 -UseBasicParsing).Content.Trim()
-            Write-Host "出口节点公网 IP：$wanIp   （手机访问 https://api.ipify.org 应显示这个 IP）"
+            Write-Host "出口节点公网 IP：$wanIp   （客户端经 SOCKS5 出网后应显示这个 IP）"
           } catch { Write-Warning "获取公网 IP 失败：$($_.Exception.Message)" }
           try {
             $g = Invoke-WebRequest -Uri "https://www.google.com/generate_204" -TimeoutSec 20 -UseBasicParsing
@@ -312,11 +345,59 @@ jobs:
           Invoke-EtCli -CliArgs @("proxy")         -CliPath $cliPath
           Invoke-EtCli -CliArgs @("node", "info")  -CliPath $cliPath
 
+          # ------------------------------------------------------------------
+          # [v7 新增] 方案 A 端到端自检：端口在听 且 真能出网
+          # ------------------------------------------------------------------
           Write-Host ""
-          Write-Host "==========================================" 
+          Write-Host "===== E2. SOCKS5 门户端到端自检（方案 A 核心）====="
+          $s5listening = $false
+          try {
+            $listen = @(Get-NetTCPConnection -LocalPort $socks5Port -State Listen -ErrorAction SilentlyContinue)
+            if ($listen.Count -gt 0) {
+              $addrs = (($listen | Select-Object -ExpandProperty LocalAddress | Sort-Object -Unique) -join ', ')
+              Write-Host "OK：已监听 TCP $socks5Port  （绑定地址：$addrs）"
+              $s5listening = $true
+            } else {
+              Write-Warning "未发现 TCP $socks5Port 处于 Listen 状态"
+            }
+          } catch { Write-Warning "端口检查异常：$($_.Exception.Message)" }
+
+          if ($s5listening) {
+            $curlExe = Join-Path $env:SystemRoot "System32\curl.exe"
+            if (Test-Path $curlExe) {
+              # --socks5-hostname：域名交给代理远端解析（等价客户端里的 socks5h），
+              # 这也是"手机需设私人 DNS 才通"那半个问题的正解。
+              $s5raw = & $curlExe -s --max-time 30 --socks5-hostname "127.0.0.1:$socks5Port" "https://api.ipify.org" 2>&1 | Out-String
+              $s5rc  = $LASTEXITCODE
+              $global:LASTEXITCODE = 0
+              $s5out = $s5raw.Trim()
+              Write-Host ">>> curl -s --max-time 30 --socks5-hostname 127.0.0.1:$socks5Port https://api.ipify.org   (exit=$s5rc)"
+              Write-Host "    返回：$s5out"
+              if ($s5rc -eq 0 -and $s5out -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                Write-Host "OK：SOCKS5 门户可正常出网，远端出口 IP = $s5out"
+              } else {
+                Write-Warning "SOCKS5 门户端到端测试未通过（exit=$s5rc）——端口在听但出网失败，请查看下方 core 日志。"
+                Show-CoreLogs -Out $outLog -Err $errLog -Tail 30
+              }
+
+              # 顺带验证"经门户能否直达 Google"（204 即成功）
+              $gRaw = & $curlExe -s -o NUL -w "%{http_code}" --max-time 30 --socks5-hostname "127.0.0.1:$socks5Port" "https://www.google.com/generate_204" 2>&1 | Out-String
+              $grc  = $LASTEXITCODE
+              $global:LASTEXITCODE = 0
+              Write-Host ">>> 经 SOCKS5 访问 google generate_204 -> HTTP $($gRaw.Trim())   (exit=$grc)"
+              if ($gRaw.Trim() -eq "204") { Write-Host "OK：经门户访问 Google 成功（HTTP 204）" }
+              else { Write-Warning "经门户访问 Google 未返回 204（实际 $($gRaw.Trim())）" }
+            } else {
+              Write-Warning "未找到 curl.exe，跳过端到端测试"
+            }
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
           Write-Host "  >>> RDP 服务器已就绪！ <<<"
           Write-Host "  EasyTier IP  : $vip"
-          Write-Host "  客户端配置   : 出口节点=$vip；自定义路由=0.0.0.0/0"
+          Write-Host "  SOCKS5 门户  : socks5h://$vip`:$socks5Port   （方案 A，推荐）"
+          Write-Host "  客户端配置   : 出口节点留空；自定义路由留空；代理指向上面地址"
           Write-Host "  连接方式     : mstsc -> 输入 $vip"
           Write-Host "=========================================="
 
@@ -333,19 +414,22 @@ jobs:
               $restarts++
               Write-Host "[$i] !! 检测到 EasyTier 进程退出（累计 $restarts 次），重新启动..."
               Show-CoreLogs -Out $outLog -Err $errLog -Tail 20
+              # 复用同一 $argList，保证重启后 --socks5 门户不丢（v7 关键）
               Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru `
                 -RedirectStandardOutput $outLog -RedirectStandardError $errLog | Out-Null
               Start-Sleep -Seconds 15
             }
 
-            # 每 30 分钟采样一次，便于观察出口流量是否真的经过本节点
+            # 每 30 分钟采样一次，便于观察门户是否持续可用
             if ($i % 30 -eq 0) {
               Write-Host "[$i/$totalMinutes] 节点数：$(Get-EtPeerCount -CliPath $cliPath)  重启次数：$restarts"
+              $listenNow = @(Get-NetTCPConnection -LocalPort $socks5Port -State Listen -ErrorAction SilentlyContinue).Count
+              Write-Host "  SOCKS5($socks5Port) Listen 数：$listenNow"
               if ($cliPath) {
                 Write-Host "  -- route list --"
                 (& $cliPath route list 2>&1 | Out-String).Trim() -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
                 $global:LASTEXITCODE = 0
-                Write-Host "  -- proxy（手机访问外网后此处应出现 NAT 条目）--"
+                Write-Host "  -- proxy（客户端经门户访问外网后此处应出现 NAT 条目）--"
                 (& $cliPath proxy 2>&1 | Out-String).Trim() -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
                 $global:LASTEXITCODE = 0
               }
