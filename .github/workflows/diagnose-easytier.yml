@@ -85,7 +85,7 @@ jobs:
           CORE=$(find /tmp/easytier -name "easytier-core" | head -1)
           CLI=$(find /tmp/easytier -name "easytier-cli" | head -1)
           # 记录 runner 本机公网 IP（用于对比出口 IP，验证流量确实走了云桌面）
-          LOCAL_WAN_IP=$(curl -s --max-time 10 https://api.ipify.org || echo unknown)
+          LOCAL_WAN_IP=$(curl -4 -s --max-time 10 https://api.ipify.org || curl -4 -s --max-time 10 https://ifconfig.me || echo unknown)
           echo "本机公网 IP（未走 VPN）：$LOCAL_WAN_IP"
           # 停掉上一步未配置出口的实例，重启为「客户端」模式：--exit-nodes 指向云桌面 .88
           sudo pkill -f easytier-core || true
@@ -108,16 +108,21 @@ jobs:
           echo "===== 关键步骤：手动接管默认路由（EasyTier exit_nodes 不会自动加路由）====="
           # 用 0/1 + 128/1 覆盖全部 IPv4 且优先级高于原默认路由，不破坏原有路由
           if [ -n "$TUNIF" ]; then
-            # 先给 peer 节点公网 IP 加例外（走原网关），否则隧道连接自身被导进 TUN 造成死循环
+            # 防环方案 A（根源）：策略路由——root 进程（easytier-core 自身）出站流量打标记走原网关，
+            # 只有普通用户（curl 等测试命令）的流量才进 TUN。否则 EasyTier 发往 .88 公网 IP 的
+            # 隧道包会被 0/1+128/1 导回 TUN 形成放大环路（上轮实测 10 秒 708MB）
             DEF_GW=$(ip route show default | awk '{print $3; exit}')
             echo "原默认网关：$DEF_GW"
-            if [ -n "$DEF_GW" ]; then
-              # 例外 1：EasyTier 已建立的所有对端连接公网 IP（含与 .88 的直连），这是防环关键
+            if [ -n "$DEF_GW" ] && sudo iptables -t mangle -A OUTPUT -m owner --uid-owner 0 -j MARK --set-mark 0x88 2>/dev/null; then
+              sudo ip rule add fwmark 0x88 table 88 priority 100 2>/dev/null || true
+              sudo ip route add table 88 default via "$DEF_GW" 2>/dev/null || sudo ip route replace table 88 default via "$DEF_GW"
+              echo "已启用 fwmark 策略路由：root 进程流量绕过 TUN"
+            else
+              echo "警告：fwmark 策略路由不可用，回退到显式例外路由（可能残留环路）"
               for pip in $(sudo ss -tunp 2>/dev/null | grep -i easytier | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|169\.254\.)' | sort -u); do
                 sudo ip route add "$pip/32" via "$DEF_GW" 2>/dev/null || true
                 echo "peer 例外路由（活动连接）：$pip via $DEF_GW"
               done
-              # 例外 2：-p 指定的转发节点域名解析出的 IPv4（可能尚未连接但即将重连）
               for host in south.koljs.dpdns.org mp.koljs.dpdns.org; do
                 for pip in $(getent ahostsv4 $host 2>/dev/null | awk '{print $1}' | sort -u); do
                   sudo ip route add "$pip/32" via "$DEF_GW" 2>/dev/null || true
@@ -139,7 +144,7 @@ jobs:
           ip route || true
           echo ""
           echo "===== 测试 0：出口 IP 对比（不同 = 流量确实经云桌面转发）====="
-          EXIT_WAN_IP=$(curl -s --max-time 20 https://api.ipify.org || echo unknown)
+          EXIT_WAN_IP=$(curl -4 -s --max-time 20 https://api.ipify.org || curl -4 -s --max-time 15 https://ifconfig.me || echo unknown)
           echo "经出口节点的公网 IP：$EXIT_WAN_IP"
           if [ "$EXIT_WAN_IP" != "$LOCAL_WAN_IP" ] && [ "$EXIT_WAN_IP" != "unknown" ]; then
             echo ">>> 转发链路验证通过：流量经云桌面 .88 出口 <<<"
