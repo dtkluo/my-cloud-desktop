@@ -1,47 +1,38 @@
 name: Windows Cloud RDP (EasyTier Secure)
 
 # ============================================================================
-# v5 修复说明（相对仓库 main 的 fb8d7487 版本，共 5 处改动）
+# v6 修复说明（相对 v5，2 处关键改动）
 # ----------------------------------------------------------------------------
-# 【结论先行】出口节点用的是「内置用户态代理」，不需要系统 IP 转发，也不需要
-#           WinNAT。原第 6 步方向错误，必须撤掉。
+# 【v5 为何失败】v5 把「启动 EasyTier」(第5步) 与「出口节点自检」(第6步) 拆成两步。
+#   实测证据（run 35434903902，commit f094091f）：
+#     - 第5步 09:31:11 成功（发现 5 个节点）
+#     - 第6步 09:31:17 三个 easytier-cli 调用全部 stdout 为空
+#   本地对 v2.6.4 实测：RPC 端口不可达时，easytier-cli 正是「stdout 空 + stderr 报错 +
+#   退出码 1」。即第6步执行时 easytier-core 已经不在。
+#   旁证：历史成功运行 run 35361540652 的保活步骤日志中有一行
+#     "[1] 检测到 EasyTier 进程退出，重新启动..." —— 说明第5步启动的核心进程
+#     在该步骤结束时即被回收，看门狗 60 秒后才发现并重启。
+#   而 GitHub 的 pwsh 包装器会在脚本末尾追加 `exit $LASTEXITCODE`，
+#   最后一条原生命令退出码为 1 ⇒ 整个步骤被判定失败（"Process completed with exit code 1"）。
 #
-# 【证据链】全部来自 EasyTier 上游源码（main 分支）：
-#  1) --enable-exit-node ⇒ 内置代理引擎启动
-#     easytier-core/src/config/gateway.rs
-#       ProxyRuntimeConfig::should_start()
-#         = !forward_by_system || no_tun
-#         forward_by_system 默认 false（未传 --proxy-forward-by-system）
-#         ⇒ should_start = true ⇒ TCP/UDP/ICMP 代理引擎全部启动
-#  2) 手机发来的包带有 EXIT_NODE 头标志
-#     easytier-core/src/peers/peer_manager.rs
-#       get_msg_dst_peer_ipv4(): 路由未命中且非同网段 ⇒ 取 exit_nodes 列表
-#       ⇒ is_exit_node = true ⇒ send_msg_by_ip() 里 set_exit_node(true)
-#  3) 该标志正是出口节点放行代理的开关
-#     easytier-core/src/gateway/proxy/tcp_proxy_engine.rs
-#       real_dst_ip_for_mode(Tcp, origin_ip, is_exit_node, ctx):
-#         cidr_table 未命中时 ⇒ (is_exit_node || ...).then_some(origin_ip)
-#       即：以东道主身份、用本机协议栈重新发起连接到真实目的地址（用户态 NAT）
-#     udp_proxy_engine.rs / icmp_proxy_engine.rs 同构
-#       （icmp 处直接写作 if real_destination.is_none() && !header.is_exit_node() ... 才 Pass）
-#   ⇒ 出口流量由 easytier-core 自己以本机地址重新发起，不经过内核转发，
-#     因此不需要 Set-NetIPInterface -Forwarding、不需要 New-NetNat，
-#     也不受入站防火墙限制。
-# ----------------------------------------------------------------------------
-# [6]  【删除】Set-NetIPInterface -Forwarding Enabled + New-NetNat
-#      - NetNAT 属于 --proxy-forward-by-system 模式；该参数未启用，属多余配置。
-#      - 更严重：-InternalIPInterfaceAddressPrefix 192.168.110.0/24 与 EasyTier
-#        自己的虚拟网段完全重叠，会让 WinNAT 试图把 Wintun TUN 当成自己的
-#        internal 接口（非其受支持类型），属未定义行为，是上一次运行失败的嫌疑源。
-#      - 改为：清理残留 EasyTierExitNAT + 默认路由归属反向校验（防止本机出网被劫持，
-#        因为代理引擎需要本机协议栈能正常出网去连 Google）。
-# [5]  修正 peer 列表解析：原 `-split '\s+-p\s+'` 会把首个元素留成
-#      "-p tcp://south...:11010"（含前导 -p），被当作一个非法 peer URL 传进去。
-#      改为按空白切分后只保留含 "://" 的 token，等价于最初可用的写法。
-# [5]  启动时打印完整参数，便于核对。
-# [6]  新增出口节点自检：记录本机公网 IP + 出网连通性 + easytier-cli proxy/route
-#      dump/stats。主人的手机测 api.ipify.org 出来应该是这里打印的 IP。
-# [8]  看门狗每 30 分钟额外打印 proxy 状态与 route dump，便于手机测试后回看证据。
+# 【v6 改动】
+#   [1] 把「启动 → 自检 → 保活」合并进同一个步骤（原5/6/7/8步），
+#       easytier-core 由该步骤自己拉起、自己持有、自己看护，不再跨步骤存活。
+#   [2] 所有诊断性调用改为「非致命」：捕获 stderr（原写法 2>$null 把关键报错丢掉了）、
+#       打印退出码、并复位 $LASTEXITCODE，末尾显式 exit 0。
+#       只有「核心起不来」才让作业失败。
+#
+# 【出口节点方案（自 v4 起保持）】
+#   出口节点使用内置用户态 TCP/UDP/ICMP 代理：未传 --proxy-forward-by-system
+#   ⇒ gateway.rs 的 should_start() = true ⇒ 代理引擎启动，出口流量由 easytier-core
+#   以本机协议栈重连真实目的地址。因此【不需要】系统 IP 转发，【不需要】 NetNAT。
+#   旧版第6步的 New-NetNat -InternalIPInterfaceAddressPrefix 192.168.110.0/24
+#   与 EasyTier 虚拟网段完全重叠，反而会让 WinNAT 把 Wintun TUN 误当 internal 接口。
+#
+# 【客户端（手机）配置】
+#   出口节点      : 192.168.110.88      <- 保留
+#   自定义路由    : 0.0.0.0/0            <- 保留（负责把流量送进隧道）
+#   改完断开重连。验证：手机访问 https://api.ipify.org 应显示云桌面的公网 IP。
 # ============================================================================
 
 on:
@@ -71,6 +62,7 @@ jobs:
 
     steps:
       - name: 1. 校验输入参数
+        shell: pwsh
         run: |
           $hours = [int]"${{ github.event.inputs.session_hours }}"
           if ($hours -lt 1 -or $hours -gt 6) {
@@ -80,6 +72,7 @@ jobs:
           Write-Host "会话时长：$hours 小时"
 
       - name: 2. 开启远程桌面（安全模式）
+        shell: pwsh
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
@@ -90,6 +83,7 @@ jobs:
           Write-Host "RDP 已启用，NLA 已开启，空闲 15 分钟自动断开"
 
       - name: 3. 创建管理员账号
+        shell: pwsh
         env:
           RDP_USER: ${{ secrets.RDP_USERNAME }}
           RDP_PASS: ${{ secrets.RDP_PASSWORD }}
@@ -107,6 +101,7 @@ jobs:
           Write-Host "管理员账号：$username，密码长度：$($password.Length) 位"
 
       - name: 4. 下载并安装 EasyTier（含参数能力自检）
+        shell: pwsh
         env:
           GH_API_TOKEN: ${{ github.token }}
         run: |
@@ -134,224 +129,227 @@ jobs:
           Write-Host "EasyTier 安装完成：$($coreExe.FullName)"
           & $coreExe.FullName --version
 
-          # 参数能力自检：出口节点方案依赖 proxy-packet 相关能力
           Write-Host "===== 关键参数语义自检 ====="
           $helpText = & $coreExe.FullName --help 2>&1 | Out-String
           $need = @("enable-exit-node", "exit-nodes", "manual-routes", "proxy-forward-by-system", "proxy-networks")
           foreach ($k in $need) {
-            if ($helpText -match [regex]::Escape($k)) {
-              Write-Host "  [OK]   --$k"
-            } else {
-              Write-Host "  [MISS] --$k（当前版本不支持，请核对 EasyTier 版本）"
-            }
+            if ($helpText -match [regex]::Escape($k)) { Write-Host "  [OK]   --$k" }
+            else { Write-Host "  [MISS] --$k（当前版本不支持，请核对 EasyTier 版本）" }
           }
           if ($helpText -notmatch "enable-exit-node") {
             Write-Error "当前 EasyTier 版本不支持 --enable-exit-node，出口节点方案无法生效，终止。"
             exit 1
           }
 
-      - name: 5. 启动 EasyTier 并验证接入网络（启用出口节点）
+      # ======================================================================
+      # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 就绪校验 -> 出口节点自检 -> 保活
+      # 单步骤持有 easytier-core，避免核心进程在步骤结束时被回收（v5 失败根因）。
+      # ======================================================================
+      - name: 5. 启动 EasyTier + 出口节点自检 + 保活（单一步骤内完成）
+        shell: pwsh
         env:
           ET_SECRET: ${{ secrets.EASYTIER_SECRET }}
         run: |
-          if (-not $env:ET_SECRET) {
-            Write-Error "未配置 EASYTIER_SECRET"
-            exit 1
-          }
-          $coreExe = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-core.exe" | Select-Object -First 1
-          $cliExe = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-cli.exe" | Select-Object -First 1
-          $corePath = $coreExe.FullName
-          $cliPath = if ($cliExe) { $cliExe.FullName } else { $null }
-          $vip = $env:ET_VIRTUAL_IP
-          $netName = $env:ET_NETWORK_NAME
-          $secret = $env:ET_SECRET
+          $ErrorActionPreference = 'Continue'
+          $ProgressPreference    = 'SilentlyContinue'
+
+          # ---------- 全局取值 ----------
+          $vip      = $env:ET_VIRTUAL_IP
+          $netName  = $env:ET_NETWORK_NAME
+          $secret   = $env:ET_SECRET
           $hostname = $env:ET_HOSTNAME
-          # [v5 修正] 按空白切分后只保留含 "://" 的 token，
-          # 避免把 "-p" 混进 peer URL（原写法会把首个元素留成 "-p tcp://xxx"）
+          $octets   = $vip.Split('.')
+          $subnet   = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+          $hours    = [int]"${{ github.event.inputs.session_hours }}"
+
+          if (-not $secret) { Write-Error "未配置 EASYTIER_SECRET"; exit 1 }
+
+          $coreExe  = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-core.exe" | Select-Object -First 1
+          $cliExe   = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-cli.exe"  | Select-Object -First 1
+          $corePath = $coreExe.FullName
+          $cliPath  = if ($cliExe) { $cliExe.FullName } else { $null }
+          $outLog   = "C:\easytier\out.log"
+          $errLog   = "C:\easytier\err.log"
+
+          # 按空白切分后只保留含 "://" 的 token：避免 PowerShell 给含空格的参数加引号后，
+          # 首个 peer 被解析成 "-p tcp://..."（旧写法只报废第 1 个节点，组网照通，掩盖了缺陷）
           $peerList = ($env:ET_PEERS -split '\s+') | Where-Object { $_ -match '://' } | ForEach-Object { $_.Trim() }
 
-          # 出口节点只需 --enable-exit-node：
-          #   ⇒ 内置用户态 TCP/UDP/ICMP 代理启动（gateway.rs should_start）
-          #   ⇒ 收到带 EXIT_NODE 标志的包时，以本机协议栈重新连接真实目的地址
-          # 不需要 --proxy-forward-by-system、不需要系统 IP 转发、不需要 NAT。
+          # ---------- 诊断辅助函数（全部非致命） ----------
+          function Invoke-EtCli {
+            param([string[]]$CliArgs, [string]$CliPath)
+            if (-not $CliPath) { Write-Host "    (未找到 easytier-cli，跳过)"; return }
+            $raw = & $CliPath @CliArgs 2>&1 | Out-String
+            $rc  = $LASTEXITCODE
+            $global:LASTEXITCODE = 0
+            Write-Host (">>> easytier-cli " + ($CliArgs -join ' ') + "   (exit=$rc)")
+            if ($raw -and $raw.Trim()) {
+              $raw.Trim() -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
+            } else {
+              Write-Host "    (无输出)"
+            }
+          }
+          function Get-EtPeerCount {
+            param([string]$CliPath)
+            if (-not $CliPath) { return -1 }
+            $o = & $CliPath peer 2>$null | Out-String
+            $global:LASTEXITCODE = 0
+            return ([regex]::Matches($o, '192\.168\.110\.\d+')).Count
+          }
+          function Show-CoreLogs {
+            param([string]$Out, [string]$Err, [int]$Tail = 30)
+            Write-Host "--- core stdout（末 $Tail 行）---"
+            if (Test-Path $Out) { Get-Content $Out -Tail $Tail -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  | $_" } }
+            Write-Host "--- core stderr（末 $Tail 行）---"
+            if (Test-Path $Err) { Get-Content $Err -Tail $Tail -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  | $_" } }
+          }
+
+          # ---------- A. 防火墙（先做完，后续不再依赖独立步骤） ----------
+          Write-Host "===== A. 防火墙：RDP 仅允许来自 EasyTier 网段 ====="
+          Disable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          Remove-NetFirewallRule  -DisplayName "RDP-EasyTier-Only" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "RDP-EasyTier-Only" -Direction Inbound -Protocol TCP `
+            -LocalPort 3389 -Action Allow -RemoteAddress $subnet | Out-Null
+          Write-Host "已限制：RDP 仅允许 $subnet"
+
+          # ---------- B. 清理历史遗留的错误 NetNAT ----------
+          Write-Host ""
+          Write-Host "===== B. 清理历史脚本遗留的错误 NetNAT ====="
+          # 旧版（fb8d7487）曾用 New-NetNat -InternalIPInterfaceAddressPrefix $subnet。
+          # 该前缀与 EasyTier 虚拟网段完全重叠，且只适用于 --proxy-forward-by-system 模式。
+          try {
+            $badNat = @(Get-NetNat -ErrorAction SilentlyContinue | Where-Object { $_.InternalIPInterfaceAddressPrefix -eq $subnet })
+            if ($badNat.Count -gt 0) {
+              foreach ($n in $badNat) { Write-Host "移除：$($n.Name)"; Remove-NetNat -Name $n.Name -Confirm:$false }
+            } else {
+              Write-Host "未发现与 $subnet 重叠的 NetNAT，无需处理。"
+            }
+          } catch {
+            Write-Host "（NetNat 检查跳过：$($_.Exception.Message)）"
+          }
+
+          # ---------- C. 启动 EasyTier ----------
+          Write-Host ""
+          Write-Host "===== C. 启动 EasyTier（出口节点）====="
           $argList = @("-i", $vip, "--network-name", $netName, "--network-secret", $secret, "--hostname", $hostname,
                        "--enable-kcp-proxy", "--enable-exit-node")
           foreach ($p in $peerList) { $argList += "-p"; $argList += $p }
+          Write-Host ("启动参数：" + ($argList -join ' '))
+          Write-Host "要点：--enable-exit-node 已启用；未指定默认路由；无系统转发 / 无 NetNAT 依赖。"
 
-          Write-Host "===== 启动参数 ====="
-          Write-Host ($argList -join ' ')
-          Write-Host "要点：--enable-exit-node 已启用；未指定默认路由；无系统转发/NAT 依赖。"
+          $proc = Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru `
+                    -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+          Write-Host "PID：$($proc.Id)"
 
-          $proc = Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru -RedirectStandardOutput "C:\easytier\out.log" -RedirectStandardError "C:\easytier\err.log"
-          Write-Host "EasyTier 进程已启动，PID：$($proc.Id)"
-
+          # ---------- D. 就绪校验 + 稳定性复检 ----------
           $ready = $false
-          for ($i = 0; $i -lt 45; $i++) {
+          for ($i = 1; $i -le 45; $i++) {
             Start-Sleep -Seconds 2
+            $proc.Refresh()
             if ($proc.HasExited) {
-              Write-Host "EasyTier 进程意外退出（退出码 $($proc.ExitCode)），重新启动..."
-              $proc = Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru -RedirectStandardOutput "C:\easytier\out.log" -RedirectStandardError "C:\easytier\err.log"
+              Write-Host "!! EasyTier 进程意外退出（exit=$($proc.ExitCode)），重启"
+              Show-CoreLogs -Out $outLog -Err $errLog -Tail 25
+              $proc = Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru `
+                        -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+              Write-Host "重启后 PID：$($proc.Id)"
             }
-            $etIP = Get-NetIPAddress -IPAddress $vip -ErrorAction SilentlyContinue
-            if ($etIP) {
-              if ($cliPath) {
-                $peerOut = & $cliPath peer 2>$null | Out-String
-                $peerCount = ([regex]::Matches($peerOut, '192\.168\.110\.\d+')).Count
-                if ($peerCount -ge 2) {
-                  Write-Host "虚拟网卡已就绪，IP：$vip；已接入虚拟网络（发现 $($peerCount) 个节点）"
-                  $ready = $true
-                  break
-                }
-                Write-Host "网卡已就绪，等待 peer 连接建立（当前可见节点：$peerCount）..."
-              } else {
-                Write-Host "虚拟网卡已就绪，IP：$vip（未找到 easytier-cli，跳过连通性验证）"
+            if (Get-NetIPAddress -IPAddress $vip -ErrorAction SilentlyContinue) {
+              if (-not $cliPath) { $ready = $true; break }
+              $pc = Get-EtPeerCount -CliPath $cliPath
+              if ($pc -ge 2) {
+                Write-Host "虚拟网卡已就绪，IP：$vip；已接入虚拟网络（发现 $pc 个节点）"
                 $ready = $true
                 break
               }
+              Write-Host "网卡已就绪，等待 peer 连接建立（当前可见节点：$pc）..."
             }
           }
           if (-not $ready) {
             Write-Error "EasyTier 未能在 90 秒内接入虚拟网络"
-            Write-Host "=== stdout（最后 60 行）==="; Get-Content "C:\easytier\out.log" -Tail 60 -ErrorAction SilentlyContinue
-            Write-Host "=== stderr ==="; Get-Content "C:\easytier\err.log" -Tail 30 -ErrorAction SilentlyContinue
+            Show-CoreLogs -Out $outLog -Err $errLog -Tail 60
             exit 1
           }
 
-      - name: 6. 出口节点自检（代理状态 + 本机出网 + 路由归属）
-        run: |
-          $vip = $env:ET_VIRTUAL_IP
-          $octets = $vip.Split('.')
-          $subnet = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
-          $cliExe = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-cli.exe" | Select-Object -First 1
+          # 稳定性复检：确认核心不会在启动后短时间内自行退出
+          Write-Host ""
+          Write-Host "===== D. 稳定性复检（等待 15 秒）====="
+          $stable = $true
+          for ($i = 1; $i -le 5; $i++) {
+            Start-Sleep -Seconds 3
+            $proc.Refresh()
+            if ($proc.HasExited) { $stable = $false; Write-Host "!! 进程已退出（exit=$($proc.ExitCode)）"; break }
+          }
+          if ($stable) { Write-Host "OK：核心进程持续存活，RPC 可达（节点数 $(Get-EtPeerCount -CliPath $cliPath)）" }
+          else { Show-CoreLogs -Out $outLog -Err $errLog -Tail 40 }
 
-          Write-Host "===== A. 清理历史脚本遗留的错误 NetNAT ====="
-          # 上一版（fb8d7487）曾用 New-NetNat -InternalIPInterfaceAddressPrefix $subnet，
-          # 该前缀与 EasyTier 虚拟网段完全重叠，且属于 --proxy-forward-by-system 模式专用，
-          # 本方案不启用该系统转发模式，故必须清掉。
-          $badNat = Get-NetNat -ErrorAction SilentlyContinue | Where-Object { $_.InternalIPInterfaceAddressPrefix -eq $subnet }
-          if ($badNat) {
-            foreach ($n in $badNat) {
-              Write-Host "移除与虚拟网段重叠的 NetNAT：$($n.Name)"
-              Remove-NetNat -Name $n.Name -Confirm:$false
+          # ---------- E. 出口节点自检（全部非致命） ----------
+          Write-Host ""
+          Write-Host "===== E. 出口节点自检 ====="
+
+          Write-Host "--- 默认路由归属（必须仍在物理网卡上，否则出口流量会成环）---"
+          try {
+            $defRoutes = @(Get-NetRoute -DestinationPrefix 0.0.0.0/0 -ErrorAction SilentlyContinue | Sort-Object RouteMetric)
+            $defRoutes | Select-Object NextHop, InterfaceAlias, RouteMetric | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+            if ($defRoutes | Where-Object { $_.InterfaceAlias -match 'EasyTier|Wintun|tun' }) {
+              Write-Warning "默认路由被虚拟网卡接管，代理引擎将无法出网！"
+            } else {
+              Write-Host "OK：默认路由归属物理网卡。"
             }
-          } else {
-            Write-Host "未发现与 $subnet 重叠的 NetNAT，无需处理。"
-          }
+          } catch { Write-Host "（检查跳过：$($_.Exception.Message)）" }
 
-          Write-Host ""
-          Write-Host "===== B. 默认路由归属（必须仍在物理网卡上）====="
-          # 代理引擎要靠本机协议栈出去连 Google；若默认路由被 Wintun 抢走，
-          # 出口流量会变成环路，必然失败。
-          $defRoutes = @(Get-NetRoute -DestinationPrefix 0.0.0.0/0 -ErrorAction SilentlyContinue | Sort-Object RouteMetric)
-          $defRoutes | Select-Object NextHop, InterfaceAlias, RouteMetric | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
-          $hijacked = $defRoutes | Where-Object { $_.InterfaceAlias -match 'EasyTier|Wintun|tun' }
-          if ($hijacked) {
-            Write-Warning "默认路由被虚拟网卡接管！代理引擎无法出网，请检查是否有 --manual-routes / -n 0.0.0.0/0 之类的配置。"
-          } else {
-            Write-Host "OK：默认路由归属物理网卡。"
-          }
-
-          Write-Host ""
-          Write-Host "===== C. 本机（出口节点）出网能力与公网 IP ====="
-          # 这个 IP 就是主人的手机访问 https://api.ipify.org 时应当看到的出口 IP。
+          Write-Host "--- 本机（出口节点）出网能力与公网 IP ---"
           try {
             $wanIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -TimeoutSec 20 -UseBasicParsing).Content.Trim()
-            Write-Host "出口节点公网 IP：$wanIp"
-          } catch {
-            Write-Warning "获取公网 IP 失败：$($_.Exception.Message)"
-          }
+            Write-Host "出口节点公网 IP：$wanIp   （手机访问 https://api.ipify.org 应显示这个 IP）"
+          } catch { Write-Warning "获取公网 IP 失败：$($_.Exception.Message)" }
           try {
             $g = Invoke-WebRequest -Uri "https://www.google.com/generate_204" -TimeoutSec 20 -UseBasicParsing
-            Write-Host "出口节点访问 Google：HTTP $($g.StatusCode)（说明本机出网正常，出口链路具备条件）"
-          } catch {
-            Write-Warning "出口节点访问 Google 失败：$($_.Exception.Message)（若本机都不通，问题不在组网）"
-          }
+            Write-Host "出口节点访问 Google：HTTP $($g.StatusCode)（本机出网正常，出口链路具备条件）"
+          } catch { Write-Warning "出口节点访问 Google 失败：$($_.Exception.Message)" }
+
+          Write-Host "--- EasyTier 路由 / 代理 / 统计 ---"
+          Invoke-EtCli -CliArgs @("route", "list") -CliPath $cliPath
+          Invoke-EtCli -CliArgs @("proxy")         -CliPath $cliPath
+          Invoke-EtCli -CliArgs @("node", "info")  -CliPath $cliPath
 
           Write-Host ""
-          Write-Host "===== D. EasyTier 代理与路由状态 ====="
-          if ($cliExe) {
-            Write-Host "--- easytier-cli route dump（本节点视角的路由表）---"
-            & $cliExe.FullName route dump 2>$null | Out-String | Write-Host
-            Write-Host "--- easytier-cli proxy（TCP/KCP 代理状态；手机访问外网后此处应出现 NAT 条目）---"
-            & $cliExe.FullName proxy 2>$null | Out-String | Write-Host
-            Write-Host "--- easytier-cli stats ---"
-            & $cliExe.FullName stats 2>$null | Out-String | Write-Host
-          } else {
-            Write-Host "未找到 easytier-cli，跳过。"
-          }
+          Write-Host "==========================================" 
+          Write-Host "  >>> RDP 服务器已就绪！ <<<"
+          Write-Host "  EasyTier IP  : $vip"
+          Write-Host "  客户端配置   : 出口节点=$vip；自定义路由=0.0.0.0/0"
+          Write-Host "  连接方式     : mstsc -> 输入 $vip"
+          Write-Host "=========================================="
 
-          Write-Host ""
-          Write-Host "===== E. 代理/出口相关日志（判定代理引擎是否启动）====="
-          $log = "C:\easytier\out.log"
-          if (Test-Path $log) {
-            $hits = Select-String -Path $log -Pattern "proxy|exit|nat|gateway" -AllMatches | Select-Object -First 40
-            if ($hits) { $hits | ForEach-Object { Write-Host $_.Line } } else { Write-Host "(日志中未出现 proxy/exit/nat 关键字)" }
-          } else {
-            Write-Host "未找到 out.log"
-          }
-
-      - name: 7. 防火墙限制 RDP 仅 EasyTier 网段
-        run: |
-          $vip = $env:ET_VIRTUAL_IP
-          $octets = $vip.Split('.')
-          $subnet = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
-          Disable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          New-NetFirewallRule -DisplayName "RDP-EasyTier-Only" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -RemoteAddress $subnet -ErrorAction SilentlyContinue | Out-Null
-          Write-Host "防火墙已限制：RDP 仅允许来自 $subnet 的连接"
-          Write-Host ""
-          Write-Host "==========================================" -ForegroundColor Green
-          Write-Host "  >>> RDP 服务器已就绪！ <<<" -ForegroundColor Cyan
-          Write-Host "  EasyTier IP  : $vip" -ForegroundColor Yellow
-          Write-Host "  出口节点     : --enable-exit-node（内置用户态代理，无系统 NAT）" -ForegroundColor Yellow
-          Write-Host "  客户端配置   : 出口节点=$vip；自定义路由=0.0.0.0/0" -ForegroundColor Yellow
-          Write-Host "  连接方式     : mstsc → 输入 $vip" -ForegroundColor Magenta
-          Write-Host "==========================================" -ForegroundColor Green
-
-      - name: 8. 保活运行（含 EasyTier 看门狗 + 周期代理状态采样）
-        env:
-          ET_SECRET: ${{ secrets.EASYTIER_SECRET }}
-        run: |
-          $coreExe = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-core.exe" | Select-Object -First 1
-          $cliExe = Get-ChildItem -Path "C:\easytier" -Recurse -Filter "easytier-cli.exe" | Select-Object -First 1
-          $corePath = $coreExe.FullName
-          $cliPath = if ($cliExe) { $cliExe.FullName } else { $null }
-          $vip = $env:ET_VIRTUAL_IP
-          $netName = $env:ET_NETWORK_NAME
-          $secret = $env:ET_SECRET
-          $hostname = $env:ET_HOSTNAME
-          # 与第 5 步严格保持一致（写法相同），否则看门狗重启会退回旧行为，
-          # 表现为「刚启动好使、几分钟后失效」。
-          $peerList = ($env:ET_PEERS -split '\s+') | Where-Object { $_ -match '://' } | ForEach-Object { $_.Trim() }
-          $argList = @("-i", $vip, "--network-name", $netName, "--network-secret", $secret, "--hostname", $hostname,
-                       "--enable-kcp-proxy", "--enable-exit-node")
-          foreach ($p in $peerList) { $argList += "-p"; $argList += $p }
-
-          $hours = [int]"${{ github.event.inputs.session_hours }}"
+          # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           $totalMinutes = $hours * 60 - 5
-          Write-Host "开始保活，持续 $totalMinutes 分钟（看门狗已启用）..."
+          Write-Host ""
+          Write-Host "===== F. 保活运行，持续 $totalMinutes 分钟（看门狗已启用）====="
+          $restarts = 0
           for ($i = 1; $i -le $totalMinutes; $i++) {
             Start-Sleep -Seconds 60
-            $proc = Get-Process -Name "easytier-core" -ErrorAction SilentlyContinue
-            if (-not $proc) {
-              Write-Host "[$i] 检测到 EasyTier 进程退出，重新启动..."
-              Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru -RedirectStandardOutput "C:\easytier\out.log" -RedirectStandardError "C:\easytier\err.log" | Out-Null
+
+            $alive = @(Get-Process -Name "easytier-core" -ErrorAction SilentlyContinue).Count -gt 0
+            if (-not $alive) {
+              $restarts++
+              Write-Host "[$i] !! 检测到 EasyTier 进程退出（累计 $restarts 次），重新启动..."
+              Show-CoreLogs -Out $outLog -Err $errLog -Tail 20
+              Start-Process -FilePath $corePath -ArgumentList $argList -WindowStyle Hidden -PassThru `
+                -RedirectStandardOutput $outLog -RedirectStandardError $errLog | Out-Null
               Start-Sleep -Seconds 15
             }
-            if ($i % 15 -eq 0) {
-              $peerCount = 0
+
+            # 每 30 分钟采样一次，便于观察出口流量是否真的经过本节点
+            if ($i % 30 -eq 0) {
+              Write-Host "[$i/$totalMinutes] 节点数：$(Get-EtPeerCount -CliPath $cliPath)  重启次数：$restarts"
               if ($cliPath) {
-                $peerOut = & $cliPath peer 2>$null | Out-String
-                $peerCount = ([regex]::Matches($peerOut, '192\.168\.110\.\d+')).Count
+                Write-Host "  -- route list --"
+                (& $cliPath route list 2>&1 | Out-String).Trim() -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
+                $global:LASTEXITCODE = 0
+                Write-Host "  -- proxy（手机访问外网后此处应出现 NAT 条目）--"
+                (& $cliPath proxy 2>&1 | Out-String).Trim() -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
+                $global:LASTEXITCODE = 0
               }
-              Write-Host "[$i/$totalMinutes] 运行中... 当前网络节点数：$peerCount"
-            }
-            # 每 30 分钟采样一次代理状态：手机测试过外网后，回看这里即可确认
-            # 出口节点是否真的建立了代理 NAT 条目。
-            if ($i % 30 -eq 0 && $cliPath) {
-              Write-Host "----- [$i] 代理状态采样 -----"
-              & $cliPath proxy 2>$null | Out-String | Write-Host
-              & $cliPath route dump 2>$null | Out-String | Write-Host
-              Write-Host "----------------------------"
             }
           }
-          Write-Host "会话正常结束。"
+          Write-Host "会话正常结束（累计重启 $restarts 次）。"
+          exit 0
