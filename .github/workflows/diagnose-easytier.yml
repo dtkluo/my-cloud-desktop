@@ -111,14 +111,20 @@ jobs:
             # 先给 peer 节点公网 IP 加例外（走原网关），否则隧道连接自身被导进 TUN 造成死循环
             DEF_GW=$(ip route show default | awk '{print $3; exit}')
             echo "原默认网关：$DEF_GW"
-            for host in south.koljs.dpdns.org mp.koljs.dpdns.org; do
-              for pip in $(getent hosts $host | awk '{print $1}' | sort -u); do
-                if [ -n "$DEF_GW" ]; then
-                  sudo ip route add "$pip/32" via "$DEF_GW" 2>/dev/null || true
-                  echo "peer 例外路由：$pip via $DEF_GW"
-                fi
+            if [ -n "$DEF_GW" ]; then
+              # 例外 1：EasyTier 已建立的所有对端连接公网 IP（含与 .88 的直连），这是防环关键
+              for pip in $(sudo ss -tunp 2>/dev/null | grep -i easytier | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|169\.254\.)' | sort -u); do
+                sudo ip route add "$pip/32" via "$DEF_GW" 2>/dev/null || true
+                echo "peer 例外路由（活动连接）：$pip via $DEF_GW"
               done
-            done
+              # 例外 2：-p 指定的转发节点域名解析出的 IPv4（可能尚未连接但即将重连）
+              for host in south.koljs.dpdns.org mp.koljs.dpdns.org; do
+                for pip in $(getent ahostsv4 $host 2>/dev/null | awk '{print $1}' | sort -u); do
+                  sudo ip route add "$pip/32" via "$DEF_GW" 2>/dev/null || true
+                  echo "peer 例外路由（配置节点）：$pip via $DEF_GW"
+                done
+              done
+            fi
             sudo ip route add 0.0.0.0/1 dev "$TUNIF" 2>/dev/null || sudo ip route replace 0.0.0.0/1 dev "$TUNIF"
             sudo ip route add 128.0.0.0/1 dev "$TUNIF" 2>/dev/null || sudo ip route replace 128.0.0.0/1 dev "$TUNIF"
             echo "已添加 0.0.0.0/1 和 128.0.0.0/1 -> $TUNIF"
@@ -143,7 +149,7 @@ jobs:
           echo ""
           echo "===== 测试 A：纯 IP 访问（绕过 DNS，验证转发链路）====="
           curl -s -o /dev/null -w "http://1.1.1.1 -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 15 http://1.1.1.1 || echo "1.1.1.1 FAILED"
-          curl -s -o /dev/null -w "http://8.8.8.8 -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 15 http://8.8.8.8 || echo "8.8.8.8 FAILED"
+          curl -s -o /dev/null -w "https://8.8.8.8 -> HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 15 https://8.8.8.8 || echo "8.8.8.8 FAILED"
           echo ""
           echo "===== 测试 B：DNS 解析（查询经出口节点转发）====="
           nslookup -timeout=10 google.com 8.8.8.8 2>&1 || true
