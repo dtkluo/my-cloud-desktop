@@ -53,8 +53,8 @@ name: Windows Cloud RDP (EasyTier Secure)
 #
 # 需要配置的仓库 Secrets：
 #   AGENTDOCK_GH_TOKEN        【必需】可读私有 release、可写私有仓库文件的 PAT
-#   AGENTDOCK_TUNNEL_TOKEN    【named 模式必需】Cloudflare Tunnel Token
-#   AGENTDOCK_PUBLIC_URL      【可选】固定域名，默认 https://agent.yundn.dpdns.org
+#   AGENTDOCK_TUNNEL_TOKEN    【named 模式必需】云桌面专属 Cloudflare Tunnel Token
+#   AGENTDOCK_PUBLIC_URL      【可选】覆盖默认固定域名 agent.yundn.dpdns.org（一般无需配置）
 #   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev4
 #   AGENTDOCK_AUTH_TOKEN      【可选】固定 Bearer Token（不配置则每次随机）
 #   AGENTDOCK_OAUTH_PASSWORD  【可选】固定 OAuth 登录密码（不配置则每次随机）
@@ -62,9 +62,11 @@ name: Windows Cloud RDP (EasyTier Secure)
 #   AGENTDOCK_STATUS_PATH     【可选】状态文件路径，默认 runtime/cloud-desktop.json
 #
 # 重要提醒：
-#   * AGENTDOCK_PUBLIC_URL 必须是「云桌面专属」的 Tunnel。若与本机 AgentDock 共用
-#     同一个 Tunnel Token，Cloudflare 会在多个 replica 间轮询，请求可能落到本机而
-#     不是云桌面（表现为「连上了但环境不对」）。未准备专属隧道时请用 quick 模式：
+#   * AGENTDOCK_PUBLIC_URL 默认 https://agent.yundn.dpdns.org。该域名与定制版 AgentDock
+#     均为「云桌面专属」：本机只用仅本机地址、其他设备另配域名，因此连到这条 Tunnel 的
+#     cloudflared 只有云桌面一个副本，请求不会落到别的机器（无需 quick 过渡）。
+#     唯一需要注意的是不要【并发】开多个云桌面会话复用同一 Tunnel Token —— 那才会出现
+#     多副本轮询（症状是「连上了但环境不对」）。需要应急时把 agentdock_tunnel 选 quick，
 #     每次会话自动生成临时地址并同步到手机。
 #   * 状态文件含 Bearer Token 明文，必须落在私有仓库，禁止贴到公开聊天 / Issue / 截图。
 # ============================================================================
@@ -85,7 +87,7 @@ on:
         required: false
         default: 'enabled'
       agentdock_tunnel:
-        description: 'AgentDock 公网接入方式：named=固定域名（需 AGENTDOCK_TUNNEL_TOKEN / AGENTDOCK_PUBLIC_URL）；quick=临时域名'
+        description: 'AgentDock 公网接入方式：named=云桌面专属固定域名 agent.yundn.dpdns.org（只需配 AGENTDOCK_TUNNEL_TOKEN）；quick=每次会话临时域名（应急用）'
         type: choice
         options:
           - named

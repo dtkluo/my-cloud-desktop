@@ -21,6 +21,8 @@
       AGENTDOCK_TUNNEL_TOKEN   named 模式必需（cloudflared tunnel token）
       AGENTDOCK_AUTH_TOKEN     固定 Bearer Token（不传则每次随机）
       AGENTDOCK_OAUTH_PASSWORD 固定 OAuth 登录密码（不传则每次随机）
+    named 模式的公网地址：-PublicUrl 缺省即用内置的云桌面专属固定域名，
+      无需额外配置；如需换域名再显式传入覆盖。
     输出：
       <WorkDirectory>\status.json   安装结果（含凭据，仅本机/私有仓库可见）
 #>
@@ -34,6 +36,11 @@ param(
     [string] $PublicUrl = '',
     [string] $WorkDirectory = 'C:\agentdock-install'
 )
+
+# 云桌面专属固定域名。定制版 AgentDock 的安装向导（packaging/windows/includes/code.iss
+# 的 DefaultNamedServerUrl）与 Cloudflare Tunnel 均绑定此域名，其他设备（含本机）不使用，
+# 因此不存在多个 cloudflared 副本连同一 tunnel 导致请求落错节点的问题。
+$defaultPublicUrl = 'https://agent.yundn.dpdns.org'
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -140,9 +147,9 @@ if ($TunnelMode -eq 'named') {
     if ([string]::IsNullOrWhiteSpace($env:AGENTDOCK_TUNNEL_TOKEN)) {
         throw 'named 模式需要 AGENTDOCK_TUNNEL_TOKEN（Cloudflare Tunnel Token）'
     }
-    if ([string]::IsNullOrWhiteSpace($PublicUrl)) {
-        throw 'named 模式需要 -PublicUrl（固定公网地址，例如 https://agent.example.com）'
-    }
+    # 未传 -PublicUrl 或显式传空串（保活重装时状态里可能没有公网地址）都回落到内置
+    # 默认域名。若放任为空，install.ps1 会走 Read-Host 交互分支，在 CI 里挂死。
+    if ([string]::IsNullOrWhiteSpace($PublicUrl)) { $PublicUrl = $defaultPublicUrl }
     # Tunnel Token 走文件而非命令行，避免出现在进程列表与日志中
     $tokenFile = Join-Path $work 'tunnel.token'
     [IO.File]::WriteAllText($tokenFile, $env:AGENTDOCK_TUNNEL_TOKEN, [Text.UTF8Encoding]::new($false))
