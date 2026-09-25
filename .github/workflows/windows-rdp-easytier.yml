@@ -42,6 +42,31 @@ name: Windows Cloud RDP (EasyTier Secure)
 # 【v7 保留项】--socks5 门户；防火墙把 1080/3389 的入站来源限定在 192.168.110.0/24。
 # 【v6 保留项】单步骤持有 easytier-core（启动→就绪→自检→保活同一步骤），
 #   避免核心进程跨步骤被回收；诊断默认非致命（出网基线自检除外，见【2】）。
+#
+# ============================================================================
+# v9 新增：云桌面启动即自动安装并启动定制版 AgentDock，并把 AI 助手连接提示词
+#   同步到手机端 workflow-controller。
+# ----------------------------------------------------------------------------
+# 流程：检出脚本 -> EasyTier 安装 -> AgentDock 静默安装（install-agentdock.ps1）
+#   -> 渲染提示词并写入私有仓库（publish-agentdock-state.ps1）
+#   -> 保活期间每 30 分钟守护与地址漂移同步（keepalive-agentdock.ps1）
+#
+# 需要配置的仓库 Secrets：
+#   AGENTDOCK_GH_TOKEN        【必需】可读私有 release、可写私有仓库文件的 PAT
+#   AGENTDOCK_TUNNEL_TOKEN    【named 模式必需】Cloudflare Tunnel Token
+#   AGENTDOCK_PUBLIC_URL      【可选】固定域名，默认 https://agent.yundn.dpdns.org
+#   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev4
+#   AGENTDOCK_AUTH_TOKEN      【可选】固定 Bearer Token（不配置则每次随机）
+#   AGENTDOCK_OAUTH_PASSWORD  【可选】固定 OAuth 登录密码（不配置则每次随机）
+#   AGENTDOCK_STATUS_REPO     【可选】状态文件仓库，默认 dtkluo/agentdock-v2
+#   AGENTDOCK_STATUS_PATH     【可选】状态文件路径，默认 runtime/cloud-desktop.json
+#
+# 重要提醒：
+#   * AGENTDOCK_PUBLIC_URL 必须是「云桌面专属」的 Tunnel。若与本机 AgentDock 共用
+#     同一个 Tunnel Token，Cloudflare 会在多个 replica 间轮询，请求可能落到本机而
+#     不是云桌面（表现为「连上了但环境不对」）。未准备专属隧道时请用 quick 模式：
+#     每次会话自动生成临时地址并同步到手机。
+#   * 状态文件含 Bearer Token 明文，必须落在私有仓库，禁止贴到公开聊天 / Issue / 截图。
 # ============================================================================
 
 on:
@@ -51,6 +76,22 @@ on:
         description: '会话时长（1-6 小时，GitHub 硬上限 6 小时）'
         required: false
         default: '6'
+      agentdock:
+        description: '云桌面就绪后自动安装并启动定制版 AgentDock，并把 AI 助手连接提示词同步到手机端'
+        type: choice
+        options:
+          - enabled
+          - disabled
+        required: false
+        default: 'enabled'
+      agentdock_tunnel:
+        description: 'AgentDock 公网接入方式：named=固定域名（需 AGENTDOCK_TUNNEL_TOKEN / AGENTDOCK_PUBLIC_URL）；quick=临时域名'
+        type: choice
+        options:
+          - named
+          - quick
+        required: false
+        default: 'named'
 
 env:
   ET_VIRTUAL_IP: 192.168.110.88
@@ -71,6 +112,9 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: 0. 检出仓库（取得 .github/scripts 下的部署脚本）
+        uses: actions/checkout@v4
+
       - name: 1. 校验输入参数
         shell: pwsh
         run: |
@@ -155,17 +199,75 @@ jobs:
           Write-Host "SOCKS5 门户参数可用，v8 前置条件满足。"
 
       # ======================================================================
+      # [v9 新增] 云桌面就绪即自动安装并启动定制版 AgentDock（私有仓库 dtkluo/agentdock-v2
+      #   的 Release），并把「AI 助手连接提示词」同步到私有仓库的状态文件，
+      #   手机端 workflow-controller 直接读取、一键复制。
+      #   两个步骤都用 continue-on-error：失败不影响 RDP / EasyTier 会话，
+      #   失败原因会写进 job summary 与状态文件。
+      # ======================================================================
+      - name: 5. 自动安装并启动定制版 AgentDock
+        if: ${{ github.event.inputs.agentdock != 'disabled' }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          AGENTDOCK_GH_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          AGENTDOCK_TUNNEL_TOKEN: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN }}
+          AGENTDOCK_AUTH_TOKEN: ${{ secrets.AGENTDOCK_AUTH_TOKEN }}
+          AGENTDOCK_OAUTH_PASSWORD: ${{ secrets.AGENTDOCK_OAUTH_PASSWORD }}
+        run: |
+          $version   = '${{ secrets.AGENTDOCK_VERSION }}'
+          if (-not $version) { $version = 'v0.8.3-dev4' }
+          $tunnel    = '${{ github.event.inputs.agentdock_tunnel }}'
+          if (-not $tunnel) { $tunnel = 'named' }
+          $publicUrl = '${{ secrets.AGENTDOCK_PUBLIC_URL }}'
+          if (-not $publicUrl) { $publicUrl = 'https://agent.yundn.dpdns.org' }
+
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/install-agentdock.ps1 `
+            -Version $version `
+            -TunnelMode $tunnel `
+            -PublicUrl $publicUrl `
+            -Port 8765
+
+      - name: 6. 生成 AI 助手连接提示词并同步到手机端
+        if: ${{ github.event.inputs.agentdock != 'disabled' }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+        run: |
+          $stateRepo = '${{ secrets.AGENTDOCK_STATUS_REPO }}'
+          if (-not $stateRepo) { $stateRepo = 'dtkluo/agentdock-v2' }
+          $statePath = '${{ secrets.AGENTDOCK_STATUS_PATH }}'
+          if (-not $statePath) { $statePath = 'runtime/cloud-desktop.json' }
+          $hours = [int]'${{ github.event.inputs.session_hours }}'
+
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/publish-agentdock-state.ps1 `
+            -StateRepo $stateRepo `
+            -StatePath $statePath `
+            -SessionHours $hours `
+            -Port 8765
+
+      # ======================================================================
       # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 基线自检 -> 就绪校验 ->
       #   门户自检 -> 保活，单步骤持有 easytier-core，避免核心进程跨步骤被回收。
       # [v8] 移除出口节点/KCP 代理；新增出网基线自检、进程优先级、外部心跳。
       # [v8.1] 取消 345 分钟主动收尾，跑满 360 分钟。
       # ======================================================================
-      - name: 5. 启动 EasyTier + 出网基线/SOCKS5 自检 + 保活（单一步骤内完成）
+      - name: 7. 启动 EasyTier + 出网基线/SOCKS5 自检 + 保活（单一步骤内完成）
         shell: pwsh
         env:
           ET_SECRET: ${{ secrets.EASYTIER_SECRET }}
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           HEARTBEAT_TOKEN: ${{ secrets.HEARTBEAT_TOKEN }}
+          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          AGENTDOCK_GH_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          AGENTDOCK_TUNNEL_TOKEN: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN }}
+          AGENTDOCK_AUTH_TOKEN: ${{ secrets.AGENTDOCK_AUTH_TOKEN }}
+          AGENTDOCK_OAUTH_PASSWORD: ${{ secrets.AGENTDOCK_OAUTH_PASSWORD }}
+          AGENTDOCK_STATUS_REPO: ${{ secrets.AGENTDOCK_STATUS_REPO }}
+          AGENTDOCK_STATUS_PATH: ${{ secrets.AGENTDOCK_STATUS_PATH }}
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
         run: |
           $ErrorActionPreference = 'Continue'
           $ProgressPreference    = 'SilentlyContinue'
@@ -519,6 +621,18 @@ jobs:
                 Send-Heartbeat 'tick'
               }
               $lastPeers = $peers
+            }
+
+            # [v9] 每 30 分钟：AgentDock 存活守护 + 连接信息漂移同步（全部非致命）
+            if ($i % 30 -eq 0 -and $env:AGENTDOCK_GH_TOKEN) {
+              try {
+                $adRepo = if ($env:AGENTDOCK_STATUS_REPO) { $env:AGENTDOCK_STATUS_REPO } else { 'dtkluo/agentdock-v2' }
+                $adPath = if ($env:AGENTDOCK_STATUS_PATH) { $env:AGENTDOCK_STATUS_PATH } else { 'runtime/cloud-desktop.json' }
+                & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/keepalive-agentdock.ps1 `
+                    -StateRepo $adRepo -StatePath $adPath
+              } catch {
+                Write-Warning "AgentDock 守护同步失败（不影响云桌面）：$($_.Exception.Message)"
+              }
             }
 
             # 每 30 分钟详细快照
