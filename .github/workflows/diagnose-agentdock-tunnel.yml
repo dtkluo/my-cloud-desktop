@@ -16,7 +16,7 @@
 #   A. DNS / TCP 7844 连通性
 #   B. cloudflared 默认协议（quic）
 #   C. cloudflared 强制 http2（用于判断 UDP/QUIC 是否被出口策略拦截）
-# 并把 cloudflared 的完整 stdout/stderr 写入 job summary 与 artifact。
+# 并把 cloudflared 的完整 stdout/stderr **脱敏后**写入 job summary 与 artifact
 # 作为常备诊断工具保留，用于日后同类「隧道未注册」问题的一键定位。
 #
 # 需要 Secrets：AGENTDOCK_TUNNEL_TOKEN
@@ -119,7 +119,7 @@ jobs:
           [void]$summary.AppendLine("# AgentDock Tunnel 诊断报告")
           [void]$summary.AppendLine("")
           [void]$summary.AppendLine("- Runner: ``$env:RUNNER_OS`` / ``windows-latest``")
-          [void]$summary.AppendLine("- Token: 长度 $($token.Length)，前缀 $($token.Substring(0,[Math]::Min(8,$token.Length)))…")
+          [void]$summary.AppendLine("- Token: 已配置，长度 $($token.Length)（仅本次测试使用，不落盘）")
           [void]$summary.AppendLine("")
 
           foreach ($case in $cases) {
@@ -174,10 +174,21 @@ jobs:
             $log = ''
             foreach ($f in @($errFile, $outFile)) {
               if (Test-Path $f) {
-                try { $log += ((Get-Content -LiteralPath $f -Raw -ErrorAction Stop) -replace [regex]::Escape($token), '<redacted>') } catch {}
+                try { $log += (Get-Content -LiteralPath $f -Raw -ErrorAction Stop) } catch {}
               }
             }
+            # 脱敏：先精确替换本次 token，再用正则兜住任何 40+ 字符的 base64/hex 长串。
+            # 为什么必须自己兜底：GitHub 只会自动 mask「与 secret 完全相等」的字串，
+            # token 一旦被拼接/编码/切片就会漏；而本仓库是公开的，run 日志人人可读。
+            $log = $log -replace [regex]::Escape($token), '<redacted>'
+            $log = $log -replace '(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/])', '<redacted-blob>'
             if (-not $log) { $log = '(日志为空)' }
+
+            # 原始日志就地销毁：artifact 只允许上传脱敏副本，杜绝误传原文。
+            Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
+            $redactDir = Join-Path $env:RUNNER_TEMP 'redacted'
+            New-Item -ItemType Directory -Path $redactDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $redactDir "cf-$case.log") -Value $log -Encoding utf8
 
             $verdict = if ($registered) { 'PASS 已注册连接' } elseif ($exitedEarly) { 'FAIL 进程提前退出' } else { 'FAIL 90s 内未注册' }
             Write-Host "结果：$verdict"
@@ -197,11 +208,11 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary.ToString() -Encoding utf8
           Write-Host "诊断报告已写入 job summary。"
 
-      - name: 6. 上传 cloudflared 原始日志
+      - name: 6. 上传 cloudflared 日志（已脱敏）
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cloudflared-logs
           path: |
-            ${{ runner.temp }}/cf-*.log
+            ${{ runner.temp }}/redacted/cf-*.log
           if-no-files-found: warn
