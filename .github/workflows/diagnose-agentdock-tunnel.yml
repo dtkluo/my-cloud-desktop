@@ -1,0 +1,192 @@
+# ============================================================================
+# AgentDock 固定域名隧道连通性诊断（只读，不安装 AgentDock、不影响云桌面）
+# ----------------------------------------------------------------------------
+# 背景：云桌面会话中 `agentdock.exe tunnel start` 报
+#   「Named Tunnel 未在 45s 内注册连接: ... connIndex=0 event=0 ip=x.x.x.x」
+#   即 cloudflared 已启动并解析 token、开始连边缘，但 45s 内未完成注册。
+#   已确认 token 本身有效（本机同 token 1s 内注册成功），故怀疑 runner 侧网络。
+#
+# 本工作流在同一类 runner（windows-latest）上做三组对照：
+#   A. DNS / TCP 7844 连通性
+#   B. cloudflared 默认协议（quic）
+#   C. cloudflared 强制 http2（用于判断 UDP/QUIC 是否被出口策略拦截）
+# 并把 cloudflared 的完整 stdout/stderr 写入 job summary 与 artifact。
+#
+# 需要 Secrets：AGENTDOCK_TUNNEL_TOKEN
+# ============================================================================
+name: Diagnose AgentDock Tunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      protocol:
+        description: '测试的传输协议：auto=只测默认；both=默认+http2 对照；quic/http2=只测指定'
+        type: choice
+        options:
+          - both
+          - auto
+          - quic
+          - http2
+        required: false
+        default: 'both'
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 1. Runner 基础信息 / 公网出口 IP
+        shell: pwsh
+        run: |
+          Write-Host "OS          : $((Get-CimInstance Win32_OperatingSystem).Caption)"
+          Write-Host "Build       : $((Get-CimInstance Win32_OperatingSystem).Version)"
+          Write-Host "PSVersion   : $($PSVersionTable.PSVersion)"
+          foreach ($u in @('https://api.ipify.org?format=json','https://api64.ipify.org?format=json')) {
+            try {
+              $r = Invoke-RestMethod -Uri $u -TimeoutSec 12
+              Write-Host "Egress IP   : $($r.ip)   (via $u)"
+            } catch { Write-Host "Egress IP   : 获取失败 ($u) - $($_.Exception.Message)" }
+          }
+
+      - name: 2. DNS 解析（Cloudflare 边缘与固定域名）
+        shell: pwsh
+        run: |
+          foreach ($h in @('region1.v2.argotunnel.com','region2.v2.argotunnel.com','api.cloudflare.com','agent.yundn.dpdns.org')) {
+            Write-Host "===== $h ====="
+            try {
+              $recs = Resolve-DnsName -Name $h -ErrorAction Stop
+              foreach ($r in $recs) {
+                if ($r.IPAddress) { Write-Host ("  {0,-6} {1}" -f $r.Type, $r.IPAddress) }
+                elseif ($r.NameHost) { Write-Host ("  {0,-6} -> {1}" -f $r.Type, $r.NameHost) }
+              }
+            } catch { Write-Host "  解析失败: $($_.Exception.Message)" }
+          }
+
+      - name: 3. TCP 7844 连通性（cloudflared 控制面端口）
+        shell: pwsh
+        run: |
+          foreach ($h in @('region1.v2.argotunnel.com','region2.v2.argotunnel.com')) {
+            $ips = @()
+            try {
+              $ips = (Resolve-DnsName -Name $h -Type A -ErrorAction Stop | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress)
+            } catch {}
+            if (-not $ips) { $ips = @($h) }
+            foreach ($ip in $ips) {
+              $t = Test-NetConnection -ComputerName $ip -Port 7844 -WarningAction SilentlyContinue
+              Write-Host ("TCP {0,-40} :7844 -> TcpTestSucceeded={1}" -f $ip, $t.TcpTestSucceeded)
+            }
+          }
+          foreach ($p in @(443,80)) {
+            $t = Test-NetConnection -ComputerName 'api.cloudflare.com' -Port $p -WarningAction SilentlyContinue
+            Write-Host ("TCP {0,-40} :{1} -> TcpTestSucceeded={2}" -f 'api.cloudflare.com', $p, $t.TcpTestSucceeded)
+          }
+
+      - name: 4. 下载 cloudflared
+        shell: pwsh
+        run: |
+          $dst = Join-Path $env:RUNNER_TEMP 'cloudflared.exe'
+          $url = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
+          curl.exe -sSL --fail --retry 3 --retry-delay 2 -o $dst $url
+          if ($LASTEXITCODE -ne 0) { throw "cloudflared 下载失败 (curl exit=$LASTEXITCODE)" }
+          Write-Host "已下载 $dst  $([math]::Round((Get-Item $dst).Length/1MB,1)) MB"
+          & $dst --version
+
+      - name: 5. Tunnel 注册对照测试
+        shell: pwsh
+        env:
+          AGENTDOCK_TUNNEL_TOKEN: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN }}
+        run: |
+          $mode  = '${{ github.event.inputs.protocol }}'
+          if (-not $mode) { $mode = 'both' }
+          $exe   = Join-Path $env:RUNNER_TEMP 'cloudflared.exe'
+          $token = $env:AGENTDOCK_TUNNEL_TOKEN
+          if (-not $token) { throw '未配置 AGENTDOCK_TUNNEL_TOKEN' }
+
+          $cases = @()
+          if ($mode -eq 'auto') { $cases = @('auto') }
+          elseif ($mode -eq 'quic' -or $mode -eq 'http2') { $cases = @($mode) }
+          else { $cases = @('auto','http2') }
+
+          $summary = [System.Text.StringBuilder]::new()
+          [void]$summary.AppendLine("# AgentDock Tunnel 诊断报告")
+          [void]$summary.AppendLine("")
+          [void]$summary.AppendLine("- Runner: ``$env:RUNNER_OS`` / ``windows-latest``")
+          [void]$summary.AppendLine("- Token: 长度 $($token.Length)，前缀 $($token.Substring(0,[Math]::Min(8,$token.Length)))…")
+          [void]$summary.AppendLine("")
+
+          foreach ($case in $cases) {
+            Write-Host ""
+            Write-Host ("=" * 70)
+            Write-Host " 测试用例：协议 = $case"
+            Write-Host ("=" * 70)
+
+            $outFile = Join-Path $env:RUNNER_TEMP "cf-$case.out.log"
+            $errFile = Join-Path $env:RUNNER_TEMP "cf-$case.err.log"
+            Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+
+            # cloudflared 从环境变量读取 token（与 agentdock 的实现一致）
+            $env:TUNNEL_TOKEN = $token
+            if ($case -eq 'auto') {
+              Remove-Item Env:\TUNNEL_TRANSPORT_PROTOCOL -ErrorAction SilentlyContinue
+            } else {
+              $env:TUNNEL_TRANSPORT_PROTOCOL = $case
+            }
+
+            $proc = Start-Process -FilePath $exe -PassThru -NoNewWindow `
+                      -ArgumentList @('tunnel','--loglevel','info','--no-autoupdate','run') `
+                      -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+
+            $deadline = (Get-Date).AddSeconds(90)
+            $registered = $false
+            $exitedEarly = $false
+            while ((Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 2
+              $text = ''
+              foreach ($f in @($errFile, $outFile)) {
+                if (Test-Path $f) {
+                  try { $text += (Get-Content -LiteralPath $f -Raw -ErrorAction Stop) } catch {}
+                }
+              }
+              if ($text -match 'Registered tunnel connection') { $registered = $true; break }
+              if ($proc.HasExited) { $exitedEarly = $true; break }
+            }
+            if (-not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+            }
+
+            $log = ''
+            foreach ($f in @($errFile, $outFile)) {
+              if (Test-Path $f) {
+                try { $log += ((Get-Content -LiteralPath $f -Raw -ErrorAction Stop) -replace [regex]::Escape($token), '<redacted>') } catch {}
+              }
+            }
+            if (-not $log) { $log = '(日志为空)' }
+
+            $verdict = if ($registered) { 'PASS 已注册连接' } elseif ($exitedEarly) { 'FAIL 进程提前退出' } else { 'FAIL 90s 内未注册' }
+            Write-Host "结果：$verdict"
+
+            [void]$summary.AppendLine("## 协议 = ``$case`` → $verdict")
+            [void]$summary.AppendLine("")
+            [void]$summary.AppendLine('```text')
+            [void]$summary.AppendLine($log.Trim())
+            [void]$summary.AppendLine('```')
+            [void]$summary.AppendLine("")
+
+            # 逐条输出到标准日志，便于 run log 直接查看
+            Write-Host $log.Trim()
+          }
+
+          Remove-Item Env:\TUNNEL_TOKEN -ErrorAction SilentlyContinue
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary.ToString() -Encoding utf8
+          Write-Host "诊断报告已写入 job summary。"
+
+      - name: 6. 上传 cloudflared 原始日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflared-logs
+          path: |
+            ${{ runner.temp }}/cf-*.log
+          if-no-files-found: warn
