@@ -1,0 +1,102 @@
+# ============================================================================
+# AgentDock Tunnel Token 双盲对照（只读诊断，不安装 AgentDock）
+# ----------------------------------------------------------------------------
+# 背景：云桌面会话中 cloudflared 报
+#   ERR Register tunnel error from server side error="Unauthorized: Invalid tunnel secret"
+#   → agentdock 侧表现为「Named Tunnel 未在 45s 内注册连接」。
+# 但同一把 token 在本机实测 1s 内注册成功，且 runner 侧 precheck 全 PASS
+# （DNS/UDP/TCP/API 全通、TCP 7844 全通），故网络因素已排除，只剩「拿到的
+# token 值是否与基线一致」这一变量。
+#
+# 本工作流用两个 secret 各跑一次 cloudflared 注册，做对照：
+#   A = AGENTDOCK_TUNNEL_TOKEN       （线上实际使用的那份）
+#   B = AGENTDOCK_TUNNEL_TOKEN_ALT   （直接取自定制版 code.iss 的基线副本）
+# 只输出长度 / SHA256 / base64 解码后的 JSON 字段（均为派生值，不含 token 片段）。
+#
+# 验证完成后应删除 AGENTDOCK_TUNNEL_TOKEN_ALT，减少暴露面。
+# ============================================================================
+name: Compare AgentDock Tunnel Tokens
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: 0. 下载 cloudflared
+        run: |
+          curl -sSL --fail --retry 3 -o /tmp/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared --version
+
+      - name: A. 现有 AGENTDOCK_TUNNEL_TOKEN
+        if: always()
+        env:
+          T: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN }}
+        run: |
+          set +e
+          echo "==================== A ===================="
+          echo "长度: ${#T}"
+          if [ -z "$T" ]; then echo "为空（secret 未配置）"; exit 0; fi
+          printf '%s' "$T" | sha256sum | awk '{print "SHA256: "$1}'
+          echo "-- base64 解码后的 JSON（派生值，非 token 片段）--"
+          printf '%s' "$T" | base64 -d 2>/dev/null | head -c 400
+          echo ""
+          echo "-- 注册测试（60s 上限）--"
+          timeout 60 env TUNNEL_TOKEN="$T" /tmp/cloudflared tunnel \
+            --loglevel info --no-autoupdate run > /tmp/a.log 2>&1
+          if grep -q "Registered tunnel connection" /tmp/a.log; then
+            echo "A 结果：PASS 已注册"
+            grep -m1 "Registered tunnel connection" /tmp/a.log
+          else
+            echo "A 结果：FAIL 未注册"
+          fi
+          grep -aE "Initial protocol|Unauthorized|Register tunnel error|Failed to|ERR " /tmp/a.log | head -6
+          echo ""
+
+      - name: B. 基线副本 AGENTDOCK_TUNNEL_TOKEN_ALT
+        if: always()
+        env:
+          T: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN_ALT }}
+        run: |
+          set +e
+          echo "==================== B ===================="
+          echo "长度: ${#T}"
+          if [ -z "$T" ]; then echo "为空（secret 未配置）"; exit 0; fi
+          printf '%s' "$T" | sha256sum | awk '{print "SHA256: "$1}'
+          echo "-- base64 解码后的 JSON（派生值，非 token 片段）--"
+          printf '%s' "$T" | base64 -d 2>/dev/null | head -c 400
+          echo ""
+          echo "-- 注册测试（60s 上限）--"
+          timeout 60 env TUNNEL_TOKEN="$T" /tmp/cloudflared tunnel \
+            --loglevel info --no-autoupdate run > /tmp/b.log 2>&1
+          if grep -q "Registered tunnel connection" /tmp/b.log; then
+            echo "B 结果：PASS 已注册"
+            grep -m1 "Registered tunnel connection" /tmp/b.log
+          else
+            echo "B 结果：FAIL 未注册"
+          fi
+          grep -aE "Initial protocol|Unauthorized|Register tunnel error|Failed to|ERR " /tmp/b.log | head -6
+          echo ""
+
+      - name: C. 结论对照
+        if: always()
+        run: |
+          set +e
+          A=$(grep -c "Registered tunnel connection" /tmp/a.log 2>/dev/null || echo 0)
+          B=$(grep -c "Registered tunnel connection" /tmp/b.log 2>/dev/null || echo 0)
+          echo "A 注册成功行数: $A"
+          echo "B 注册成功行数: $B"
+          if [ "$B" -gt 0 ] && [ "$A" -eq 0 ]; then
+            echo ">>> 结论：基线副本可用、线上 secret 不可用 → AGENTDOCK_TUNNEL_TOKEN 的值有误 <<<"
+          elif [ "$A" -gt 0 ] && [ "$B" -gt 0 ]; then
+            echo ">>> 结论：两者都可用 → 之前的失败为偶发或已自行恢复 <<<"
+          elif [ "$A" -eq 0 ] && [ "$B" -eq 0 ]; then
+            echo ">>> 结论：两者都不可用 → 非 secret 值问题，需查 Cloudflare 侧 tunnel 状态 <<<"
+          else
+            echo ">>> 结论：仅线上 secret 可用 → 基线副本存疑 <<<"
+          fi

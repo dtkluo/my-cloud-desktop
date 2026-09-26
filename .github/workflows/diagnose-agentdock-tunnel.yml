@@ -77,7 +77,7 @@ jobs:
               Write-Host ("TCP {0,-40} :7844 -> TcpTestSucceeded={1}" -f $ip, $t.TcpTestSucceeded)
             }
           }
-          foreach ($p in @(443,80)) {
+          foreach ($p in @(443)) {
             $t = Test-NetConnection -ComputerName 'api.cloudflare.com' -Port $p -WarningAction SilentlyContinue
             Write-Host ("TCP {0,-40} :{1} -> TcpTestSucceeded={2}" -f 'api.cloudflare.com', $p, $t.TcpTestSucceeded)
           }

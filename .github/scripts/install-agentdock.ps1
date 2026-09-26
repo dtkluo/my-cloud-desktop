@@ -62,6 +62,87 @@ function Write-Summary {
     }
 }
 
+function Get-AgentDockTunnelLogs {
+    <#
+      收集 cloudflared 的原始日志。
+      背景：tunnel start 失败时 agentdock.exe 只把日志尾部 2048 字节经 result.ini
+      回传，而多行值会被上方按行解析的 INI 读取逻辑截断，最终往往只剩一行，
+      不足以定位（例如「Named Tunnel 未在 45s 内注册连接」就丢掉了全部上下文）。
+      这里直接读取落盘日志写入 job summary，保证下一次会话能拿到一手证据。
+      cloudflared 日志位置：<runtime-root>\cloudflared.{err,out}.log
+    #>
+    param([int] $MaxBytes = 16384)
+
+    $bases = @()
+    foreach ($base in @($env:LOCALAPPDATA, $env:ProgramData, $env:USERPROFILE)) {
+        if ([string]::IsNullOrWhiteSpace($base)) { continue }
+        $candidate = Join-Path $base 'AgentDock'
+        if (Test-Path -LiteralPath $candidate) { $bases += $candidate }
+    }
+    if ($bases.Count -eq 0) { return '' }
+
+    $secrets = @($env:AGENTDOCK_TUNNEL_TOKEN, $env:AGENTDOCK_AUTH_TOKEN,
+                 $env:AGENTDOCK_OAUTH_PASSWORD, $env:AGENTDOCK_GH_TOKEN) |
+               Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($root in $bases) {
+        foreach ($name in @('cloudflared.err.log', 'cloudflared.out.log')) {
+            $files = @(Get-ChildItem -LiteralPath $root -Recurse -Filter $name -File -ErrorAction SilentlyContinue)
+            foreach ($f in $files) {
+                [void]$sb.AppendLine("##### $($f.FullName)  ($($f.Length) 字节) #####")
+                try {
+                    $text = Get-Content -LiteralPath $f.FullName -Raw -Encoding utf8 -ErrorAction Stop
+                    if (-not $text) { $text = '(空)' }
+                    if ($text.Length -gt $MaxBytes) {
+                        $text = '...[已裁剪前部]...' + "`n" + $text.Substring($text.Length - $MaxBytes)
+                    }
+                    foreach ($secret in $secrets) {
+                        $text = $text -replace [regex]::Escape($secret), '<redacted>'
+                    }
+                    [void]$sb.AppendLine($text.TrimEnd())
+                } catch {
+                    [void]$sb.AppendLine("(读取失败：$($_.Exception.Message))")
+                }
+            }
+        }
+    }
+    return $sb.ToString().Trim()
+}
+
+# 顶层兜底：任何未处理异常（release 404、资产下载失败、网络中断等）都必须落一份
+# 可见的失败状态。否则状态文件会停留在上一次会话的旧值，手机端表现为「一切正常」，
+# 而实际链路早已失效——这是最难排查的一类故障。
+trap {
+    try {
+        $trapMessage = $_.Exception.Message
+        Write-Warning "安装流程异常终止：$trapMessage"
+        Write-Status @{
+            stage             = 'failed'
+            success           = $false
+            error_code        = 'unhandled-exception'
+            message           = $trapMessage
+            requested_version = $Version
+            tunnel_mode       = $TunnelMode
+            install_exit      = -1
+        }
+        $trapLines = @(
+            ''
+            '## AgentDock 安装流程异常终止'
+            ''
+            "- 请求版本：``$Version``"
+            "- 隧道模式：$TunnelMode"
+            "- 异常信息：$trapMessage"
+        )
+        $trapLogs = Get-AgentDockTunnelLogs
+        if ($trapLogs) { $trapLines += @('', '```text', $trapLogs, '```') }
+        Write-Summary ($trapLines -join "`n")
+    } catch {
+        Write-Warning "记录失败状态时再次出错：$($_.Exception.Message)"
+    }
+    exit 0
+}
+
 if ([string]::IsNullOrWhiteSpace($env:AGENTDOCK_GH_TOKEN)) {
     Write-Warning '未配置 AGENTDOCK_GH_TOKEN，跳过 AgentDock 安装（需具备读取私有仓库 release 的权限）。'
     Write-Status @{
@@ -83,13 +164,21 @@ $headers = @{
 }
 
 # ---------- 1. 解析 release ----------
-$apiUrl = if ($Version -eq 'latest') {
-    "https://api.github.com/repos/$owner/$repo/releases/latest"
+# 注意：dtkluo/agentdock-v2 的 release 全部标记为 prerelease，GitHub 的
+# /releases/latest 只返回「最新的非 prerelease」，在本仓库必然 404。
+# 因此 'latest' 走列表接口显式取首项（含 prerelease）；同时把解析出的真实
+# tag 写进状态文件，避免保活重装拿到字面量 'latest' 再次 404。
+if ([string]::IsNullOrWhiteSpace($Version) -or $Version -in @('latest', 'auto')) {
+    $releaseList = Invoke-RestMethod -Uri "https://api.github.com/repos/$owner/$repo/releases?per_page=1" -Headers $headers
+    if (-not $releaseList -or @($releaseList).Count -eq 0) {
+        throw "仓库 $AgentDockRepo 没有任何 release（含 prerelease）"
+    }
+    $release = @($releaseList)[0]
 } else {
-    "https://api.github.com/repos/$owner/$repo/releases/tags/$Version"
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$owner/$repo/releases/tags/$Version" -Headers $headers
 }
-$release = Invoke-RestMethod -Uri $apiUrl -Headers $headers
-Write-Host "定制版 AgentDock：$($release.tag_name)（发布于 $($release.published_at)）"
+$resolvedVersion = [string] $release.tag_name
+Write-Host "定制版 AgentDock：$resolvedVersion（发布于 $($release.published_at)）"
 
 # ---------- 2. 下载资产 ----------
 function Save-ReleaseAsset {
@@ -198,7 +287,8 @@ $status = @{
     message        = Get-Value 'Message'
     warning_code   = Get-Value 'WarningCode'
     warning        = Get-Value 'WarningMessage'
-    version        = Get-Value 'Version'
+    version        = $resolvedVersion
+    engine_version = Get-Value 'Version'
     local_mcp_url  = (Get-Value 'LocalMCPUrl')
     public_mcp_url = (Get-Value 'PublicMCPUrl').TrimEnd('/')
     bearer_token   = Get-Value 'BearerToken'
@@ -229,13 +319,29 @@ if ($status.success) {
 "@
 } else {
     Write-Warning "AgentDock 安装未成功：$($status.error_code) $($status.message)"
-    Write-Summary @"
-## AgentDock 安装未成功
 
-- 阶段错误码：`$($status.error_code)`
-- 说明：$($status.message)
-- install.ps1 退出码：$installExit
-
-云桌面（RDP / EasyTier）不受影响，可照常使用。
-"@
+    # agentdock 回传给 result.ini 的 message 只保留了 cloudflared 日志尾部的一行
+    # （INI 按行解析会截断多行值），不足以定位失败原因；这里把落盘日志原文补上。
+    $tunnelLogs = Get-AgentDockTunnelLogs
+    $summaryLines = @(
+        ''
+        '## AgentDock 安装未成功'
+        ''
+        "- 请求版本：``$Version``"
+        "- 解析版本：``$resolvedVersion``"
+        "- 阶段错误码：``$($status.error_code)``"
+        "- install.ps1 退出码：$installExit"
+        "- 隧道模式：$TunnelMode"
+        ''
+        '### agentdock 回传的 message'
+        ''
+        '```text'
+        $status.message
+        '```'
+    )
+    if ($tunnelLogs) {
+        $summaryLines += @('', '### cloudflared 原始日志', '', '```text', $tunnelLogs, '```')
+    }
+    $summaryLines += @('', '云桌面（RDP / EasyTier）不受影响，可照常使用。')
+    Write-Summary ($summaryLines -join "`n")
 }

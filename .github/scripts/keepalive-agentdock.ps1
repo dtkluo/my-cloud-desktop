@@ -49,7 +49,10 @@ if (-not $coreAlive -and -not $healthOk) {
     if ($NoRepair) {
         Write-Warning '（已指定 -NoRepair，跳过重装）'
     } else {
-        $version = if ($status.version) { $status.version } else { 'v0.8.3-dev4' }
+        # 版本留空即交由 install-agentdock.ps1 自行解析：其默认 tag 与本文件解耦，
+        # 且 'latest' 会走 release 列表接口取（含 prerelease）的最新 tag。
+        # 历史状态文件里可能残留字面量 'latest'，该脚本也能正确处理，不再 404。
+        $version = if ($status.version) { $status.version } else { '' }
         $tunnel  = if ($status.tunnel_mode) { $status.tunnel_mode } else { 'named' }
         $public  = if ($status.public_mcp_url) { ($status.public_mcp_url -replace '/mcp$', '') } else { '' }
 
