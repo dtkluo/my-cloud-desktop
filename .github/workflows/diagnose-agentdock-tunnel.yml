@@ -4,13 +4,20 @@
 # 背景：云桌面会话中 `agentdock.exe tunnel start` 报
 #   「Named Tunnel 未在 45s 内注册连接: ... connIndex=0 event=0 ip=x.x.x.x」
 #   即 cloudflared 已启动并解析 token、开始连边缘，但 45s 内未完成注册。
-#   已确认 token 本身有效（本机同 token 1s 内注册成功），故怀疑 runner 侧网络。
+#
+# 结论（2026-09-26 已结案）：真因不是网络，而是仓库 secret
+#   AGENTDOCK_TUNNEL_TOKEN 的值与定制版 code.iss 基线不一致——cloudflared 日志
+#   明确给出 `ERR Register tunnel error from server side error="Unauthorized:
+#   Invalid tunnel secret"`，属服务端认证拒绝。本工作流排除了网络/协议因素
+#   （DNS、TCP 7844、quic/http2 两协议表现一致），最终由双盲对照定位到取值问题。
+#   该 secret 已重置为基线值。
 #
 # 本工作流在同一类 runner（windows-latest）上做三组对照：
 #   A. DNS / TCP 7844 连通性
 #   B. cloudflared 默认协议（quic）
 #   C. cloudflared 强制 http2（用于判断 UDP/QUIC 是否被出口策略拦截）
 # 并把 cloudflared 的完整 stdout/stderr 写入 job summary 与 artifact。
+# 作为常备诊断工具保留，用于日后同类「隧道未注册」问题的一键定位。
 #
 # 需要 Secrets：AGENTDOCK_TUNNEL_TOKEN
 # ============================================================================
@@ -151,10 +158,18 @@ jobs:
               if ($text -match 'Registered tunnel connection') { $registered = $true; break }
               if ($proc.HasExited) { $exitedEarly = $true; break }
             }
+            # 必须整棵进程树一起杀：cloudflared 会为每条连接派生 Edge 子进程，
+            # 只 Stop-Process 父进程时子进程仍存活并持有 stdout/stderr 重定向句柄，
+            # 管道不关闭 → 本 step 结束时 PowerShell 不返回，job 会一直挂到超时。
             if (-not $proc.HasExited) {
-              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
               Start-Sleep -Seconds 2
             }
+            # 兜底：清掉本用例可能残留的 cloudflared 进程
+            Get-Process -Name cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+              & taskkill.exe /T /F /PID $_.Id 2>&1 | Out-Null
+            }
+            Start-Sleep -Seconds 1
 
             $log = ''
             foreach ($f in @($errFile, $outFile)) {
