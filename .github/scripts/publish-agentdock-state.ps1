@@ -54,7 +54,7 @@ $publicMcp = Normalize-McpUrl $status.public_mcp_url
 $localMcp  = Normalize-McpUrl $status.local_mcp_url
 
 # ---------- 运行时存活探测 ----------
-$coreAlive = @(Get-Process -Name 'agentdock' -ErrorAction SilentlyContinue).Count -gt 0
+$coreAlive = @(Get-Process -Name 'agentdock-core' -ErrorAction SilentlyContinue).Count -gt 0
 $healthOk  = $false
 try {
     Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 8 | Out-Null
