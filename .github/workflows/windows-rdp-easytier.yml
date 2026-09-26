@@ -58,8 +58,9 @@ name: Windows Cloud RDP (EasyTier Secure)
 #   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev4
 #   AGENTDOCK_AUTH_TOKEN      【可选】固定 Bearer Token（不配置则每次随机）
 #   AGENTDOCK_OAUTH_PASSWORD  【可选】固定 OAuth 登录密码（不配置则每次随机）
-#   AGENTDOCK_STATUS_REPO     【可选】状态文件仓库，默认 dtkluo/agentdock-v2
-#   AGENTDOCK_STATUS_PATH     【可选】状态文件路径，默认 runtime/cloud-desktop.json
+#   AGENTDOCK_STATUS_REPO     【可选】状态文件仓库；不配则用工作流顶层 env 的默认值
+#   AGENTDOCK_STATUS_PATH     【可选】状态文件路径；不配则用工作流顶层 env 的默认值
+#                             （默认值单点定义在顶层 env，本文件其它位置不再重复写）
 #
 # 重要提醒：
 #   * AGENTDOCK_PUBLIC_URL 默认 https://agent.yundn.dpdns.org。该域名与定制版 AgentDock
@@ -107,6 +108,16 @@ env:
     -p udp://mp.koljs.dpdns.org:11010
     -p tcp://south.koljs.dpdns.org:11014
     -p udp://south.koljs.dpdns.org:11014
+
+  # ---------------------------------------------------------------------------
+  # AgentDock 状态文件的落点（「发布」与「保活同步」共用同一份定义）
+  #   * 未配置 secret 时自动落到下面内联的默认值上（`||` 在未定义时取右侧）；
+  #   * 默认值**只此一处**：改落点时改这里即可，不要再往别的步骤里写 fallback，
+  #     否则发布写 A、保活读 B 的静默漂移迟早会发生。
+  #   * 注意 step 级 env 若再次声明同名变量会覆盖此处 —— 请勿这么做。
+  # ---------------------------------------------------------------------------
+  AGENTDOCK_STATUS_REPO: ${{ secrets.AGENTDOCK_STATUS_REPO || 'dtkluo/agentdock-v2' }}
+  AGENTDOCK_STATUS_PATH: ${{ secrets.AGENTDOCK_STATUS_PATH || 'runtime/cloud-desktop.json' }}
 
 jobs:
   build:
@@ -238,10 +249,10 @@ jobs:
           STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
           RDP_USER: ${{ secrets.RDP_USERNAME }}
         run: |
-          $stateRepo = '${{ secrets.AGENTDOCK_STATUS_REPO }}'
-          if (-not $stateRepo) { $stateRepo = 'dtkluo/agentdock-v2' }
-          $statePath = '${{ secrets.AGENTDOCK_STATUS_PATH }}'
-          if (-not $statePath) { $statePath = 'runtime/cloud-desktop.json' }
+          # 落点（含默认值）由工作流顶层 env 单点定义，此处只读取
+          $stateRepo = $env:AGENTDOCK_STATUS_REPO
+          $statePath = $env:AGENTDOCK_STATUS_PATH
+          Write-Host "状态文件落点：$stateRepo / $statePath"
           $hours = [int]'${{ github.event.inputs.session_hours }}'
 
           pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/publish-agentdock-state.ps1 `
@@ -267,8 +278,8 @@ jobs:
           AGENTDOCK_TUNNEL_TOKEN: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN }}
           AGENTDOCK_AUTH_TOKEN: ${{ secrets.AGENTDOCK_AUTH_TOKEN }}
           AGENTDOCK_OAUTH_PASSWORD: ${{ secrets.AGENTDOCK_OAUTH_PASSWORD }}
-          AGENTDOCK_STATUS_REPO: ${{ secrets.AGENTDOCK_STATUS_REPO }}
-          AGENTDOCK_STATUS_PATH: ${{ secrets.AGENTDOCK_STATUS_PATH }}
+          # 刻意不在此声明 AGENTDOCK_STATUS_*：顶层 env 已定义（含默认值），
+          # step 级同名变量会用它（此处为空）覆盖顶层值，使默认值失效。
           RDP_USER: ${{ secrets.RDP_USERNAME }}
         run: |
           $ErrorActionPreference = 'Continue'
@@ -628,8 +639,9 @@ jobs:
             # [v9] 每 30 分钟：AgentDock 存活守护 + 连接信息漂移同步（全部非致命）
             if ($i % 30 -eq 0 -and $env:AGENTDOCK_GH_TOKEN) {
               try {
-                $adRepo = if ($env:AGENTDOCK_STATUS_REPO) { $env:AGENTDOCK_STATUS_REPO } else { 'dtkluo/agentdock-v2' }
-                $adPath = if ($env:AGENTDOCK_STATUS_PATH) { $env:AGENTDOCK_STATUS_PATH } else { 'runtime/cloud-desktop.json' }
+                # 顶层 env 已含默认值（单一来源），此处直接取用
+                $adRepo = $env:AGENTDOCK_STATUS_REPO
+                $adPath = $env:AGENTDOCK_STATUS_PATH
                 & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/keepalive-agentdock.ps1 `
                     -StateRepo $adRepo -StatePath $adPath
               } catch {
