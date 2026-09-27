@@ -167,6 +167,14 @@ jobs:
           net user runneradmin $password | Out-Null
           Write-Host "管理员账号：$username，密码长度：$($password.Length) 位"
 
+          # 供步骤 5.5「自动建立 rdpadmin 交互会话」复用。
+          # 未配置 secrets.RDP_PASSWORD 时密码是随机生成的，只有本步骤知道，
+          # 不落盘后续步骤就拿不到。VM 为一次性（每次开机重建），不跨会话留存。
+          $passFile = 'C:\agentdock-install\rdp-password.txt'
+          New-Item -ItemType Directory -Force -Path (Split-Path $passFile) | Out-Null
+          Set-Content -LiteralPath $passFile -Value $password -Encoding ASCII -NoNewline
+          Write-Host "已保存密码到 $passFile"
+
       - name: 4. 下载并安装 EasyTier（含参数能力自检）
         shell: pwsh
         env:
@@ -240,6 +248,52 @@ jobs:
             -TunnelMode $tunnel `
             -PublicUrl $publicUrl `
             -Port 8765
+
+      # ======================================================================
+      # [v9.2 新增] 自动建立 rdpadmin 的交互式会话 —— 去掉「人工 RDP 一下」这一步。
+      #
+      #   为什么需要：AgentDock 是**按用户安装**的，安装器注册了计划任务
+      #     AgentDock-UserInstall（触发 = rdpadmin 登录时 / LogonType Interactive）。
+      #   而工作流所有步骤都跑在 runneradmin 的会话里，rdpadmin 从不登录
+      #     => 登录触发器永不响 => AgentDock 起不来，过去只能靠人工 RDP 点燃。
+      #
+      #   怎么解决：从本机**自己 RDP 自己**（127.0.0.1:3389）。环回 RDP 会为
+      #     rdpadmin 造出一个真正的交互式会话，于是计划任务触发、AgentDock 拉起；
+      #     随后杀掉 mstsc，会话转为 Disconnected 但**不注销**，AgentDock 继续跑。
+      #     用户之后再连进来会**接回同一个会话**，看到的就是已就绪的桌面。
+      #
+      #   为什么插在步骤 6 之前：步骤 6 负责把状态同步到手机端，
+      #     唤醒成功后再同步，首次写入的状态就是「已就绪」而非「待登录」。
+      #
+      #   失败不阻断：continue-on-error，用户仍可人工 RDP 兜底。
+      # ======================================================================
+      - name: 5.5 自动建立 rdpadmin 交互会话（免人工 RDP）
+        if: ${{ github.event.inputs.agentdock != 'disabled' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $user = if ($env:RDP_USER) { $env:RDP_USER } else { 'rdpadmin' }
+          $passFile = 'C:\agentdock-install\rdp-password.txt'
+
+          # 优先用 secret；没配就用步骤 3 生成并落盘的那份
+          if ($env:RDP_PASS) {
+            $pass = $env:RDP_PASS
+          } elseif (Test-Path -LiteralPath $passFile) {
+            $pass = (Get-Content -LiteralPath $passFile -Raw).Trim()
+          } else {
+            Write-Warning '拿不到 rdpadmin 密码，跳过自动唤醒（仍需人工 RDP 一次）'
+            exit 0
+          }
+
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/wake-rdpadmin-session.ps1 `
+            -User $user `
+            -Password $pass `
+            -Port 8765 `
+            -TimeoutSec 180
 
       - name: 6. 生成 AI 助手连接提示词并同步到手机端
         if: ${{ github.event.inputs.agentdock != 'disabled' }}
