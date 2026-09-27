@@ -49,7 +49,7 @@ name: Windows Cloud RDP (EasyTier Secure)
 # ----------------------------------------------------------------------------
 # 流程：检出脚本 -> EasyTier 安装 -> AgentDock 静默安装（install-agentdock.ps1）
 #   -> 渲染提示词并写入私有仓库（publish-agentdock-state.ps1）
-#   -> 保活期间每 30 分钟守护与地址漂移同步（keepalive-agentdock.ps1）
+#   -> 保活期间每 1 分钟同步连接信息、每 30 分钟完整守护（keepalive-agentdock.ps1）
 #
 # 需要配置的仓库 Secrets：
 #   AGENTDOCK_GH_TOKEN        【必需】可读私有 release、可写私有仓库文件的 PAT
@@ -636,14 +636,23 @@ jobs:
               $lastPeers = $peers
             }
 
-            # [v9] 每 30 分钟：AgentDock 存活守护 + 连接信息漂移同步（全部非致命）
-            if ($i % 30 -eq 0 -and $env:AGENTDOCK_GH_TOKEN) {
+            # [v9.1] AgentDock 连接信息同步：30 分钟 -> 1 分钟
+            # 登录后云桌面本地 status.json 会立刻变成 health=healthy，但手机端
+            # workflow-controller 读的是仓库里的状态文件 —— 30 分钟一次 ⇒ 手机上
+            # 「待登录」标签最长会多挂 30 分钟。改成每分钟同步一次，滞后压到 1 分钟内。
+            # 开销可控：publish-agentdock-state.ps1 带 -OnlyIfChanged，无变化时只发一次
+            # GET、不产生提交，因此提高频率不会污染仓库历史。
+            # 修复动作（触发登录任务 / 就地重装）仍保持 30 分钟一次（-NoRepair），
+            # 避免 AgentDock 起不来时每分钟反复触发安装。
+            if ($env:AGENTDOCK_GH_TOKEN) {
               try {
                 # 顶层 env 已含默认值（单一来源），此处直接取用
                 $adRepo = $env:AGENTDOCK_STATUS_REPO
                 $adPath = $env:AGENTDOCK_STATUS_PATH
+                $adArgs = @()
+                if ($i % 30 -ne 0) { $adArgs += '-NoRepair' }
                 & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/keepalive-agentdock.ps1 `
-                    -StateRepo $adRepo -StatePath $adPath
+                    -StateRepo $adRepo -StatePath $adPath @adArgs
               } catch {
                 Write-Warning "AgentDock 守护同步失败（不影响云桌面）：$($_.Exception.Message)"
               }
