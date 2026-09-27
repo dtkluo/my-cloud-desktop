@@ -649,8 +649,10 @@ jobs:
                 # 顶层 env 已含默认值（单一来源），此处直接取用
                 $adRepo = $env:AGENTDOCK_STATUS_REPO
                 $adPath = $env:AGENTDOCK_STATUS_PATH
-                $adArgs = @()
-                if ($i % 30 -ne 0) { $adArgs += '-NoRepair' }
+                # 必须用哈希表 splatting：数组形式 @('-NoRepair') 在 Windows PowerShell 5.1
+                # 上不会绑定成参数（实测 PSBoundParameters 里没有它），switch 会被静默忽略。
+                $adArgs = @{ }
+                if ($i % 30 -ne 0) { $adArgs['NoRepair'] = $true }
                 & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/keepalive-agentdock.ps1 `
                     -StateRepo $adRepo -StatePath $adPath @adArgs
               } catch {
