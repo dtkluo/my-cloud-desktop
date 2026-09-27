@@ -46,22 +46,37 @@ L ("whoami=" + (whoami))
 L ("session=" + $mySession)
 L ("userprofile=" + $env:USERPROFILE)
 
+function Read-TextSafe {
+    param([string] $Path)
+    # IMPORTANT: do NOT use [IO.File]::ReadAllText here. Its default share mode is
+    # FileShare.Read (= "others may read, nobody may write"), so it FAILS against any
+    # file currently held open for writing. cloudflared keeps cloudflared.err.log open
+    # for the whole session, so every read threw an IOException and was swallowed by
+    # the catch below -> this script could never see "Registered tunnel connection"
+    # and always reported tunnel_registered=False although the tunnel was up.
+    # Observed 2026-09-27 on run #47: 4 registrations in the log, still judged False,
+    # which turned the task result into 1 and stamped error_code=provision-incomplete.
+    # Get-Content works because PowerShell opens with FileShare.ReadWrite. Do the same.
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return '' }
+        $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+        } finally { $fs.Dispose() }
+    } catch { }
+    return ''
+}
+
 function Read-Ini {
     param([string] $Path)
     $kv = @{}
-    if (Test-Path -LiteralPath $Path) {
-        # .NET read: detects and strips a BOM (PS 5.1 Get-Content would assume ANSI)
-        foreach ($line in (([IO.File]::ReadAllText($Path)) -split "`r?`n")) {
-            if ($line -match '^\s*([A-Za-z]+)\s*=\s*(.*)$') { $kv[$Matches[1]] = $Matches[2].Trim() }
-        }
+    # .NET read detects and strips a BOM (PS 5.1 Get-Content would assume ANSI);
+    # Read-TextSafe additionally tolerates a file held open by another writer.
+    foreach ($line in ((Read-TextSafe $Path) -split "`r?`n")) {
+        if ($line -match '^\s*([A-Za-z]+)\s*=\s*(.*)$') { $kv[$Matches[1]] = $Matches[2].Trim() }
     }
     return $kv
-}
-
-function Read-TextSafe {
-    param([string] $Path)
-    try { if (Test-Path -LiteralPath $Path) { return [IO.File]::ReadAllText($Path) } } catch { }
-    return ''
 }
 
 try {
@@ -147,50 +162,81 @@ try {
     L "healthz_after=$ok"
 
     # ---- wait for the tunnel to register ----
+    # Evidence, in order of reliability:
+    #   1) cloudflared's own log ("Registered tunnel connection", 4 lines on a healthy
+    #      start) -- both .err.log and .out.log are scanned since the split varies;
+    #   2) the public entry point answering /healthz -- the end-to-end truth, used as a
+    #      fallback in case the log is rotated or truncated during the wait.
+    # Either hit counts as registered. The log alone was previously NOT readable at all
+    # (see the FileShare note in Read-TextSafe), which is what caused the false negative.
     $reg = $false
+    $regEv = ''
     if ($ok -and $tunnelMode -ne 'none') {
-        for ($i = 0; $i -lt 60; $i++) {
-            $t = Read-TextSafe (Join-Path $root 'cloudflared.err.log')
-            if ($t -and ($t -match 'Registered tunnel connection')) { $reg = $true; break }
+        $cfLogs = @('cloudflared.err.log', 'cloudflared.out.log')
+        for ($i = 0; $i -lt 90; $i++) {
+            foreach ($n in $cfLogs) {
+                $t = Read-TextSafe (Join-Path $root $n)
+                if ($t -and ($t -match 'Registered tunnel connection')) { $reg = $true; $regEv = "log:$n"; break }
+            }
+            if ($reg) { break }
+            # Give the tunnel a ~30s head start before poking the public endpoint.
+            if ($serverUrl -and $i -ge 15 -and ($i % 5 -eq 0)) {
+                try {
+                    Invoke-WebRequest "$serverUrl/healthz" -TimeoutSec 8 -UseBasicParsing | Out-Null
+                    $reg = $true; $regEv = 'public-healthz'; break
+                } catch { }
+            }
             Start-Sleep -Seconds 2
         }
     } elseif ($ok) {
-        $reg = $true
+        $reg = $true; $regEv = 'tunnel-mode-none'
     }
     $cfSessions = @(Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SessionId)
     $coreSessions = @(Get-Process -Name 'agentdock-core' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SessionId)
     L "cloudflared_sessions=$($cfSessions -join ',')"
     L "core_sessions=$($coreSessions -join ',')"
     L "tunnel_registered=$reg"
+    L "tunnel_evidence=$regEv"
 
     # ---- write status.json back (consumed by keepalive / publish step) ----
     $success = $ok -and $reg -and ($coreSessions -contains $mySession)
+    $coreInSession = ($coreSessions -contains $mySession)
     $publicMcp = ''
     if ($tunnelMode -ne 'none') { $publicMcp = "$serverUrl/mcp" }
     $msg = 'AgentDock installed and started inside the target user session'
     $code = ''
     if (-not $success) {
         $msg = 'Install or tunnel verification did not pass; see provision-report.txt'
-        $code = 'provision-incomplete'
+        # Name the failing stage so a later reader does not have to re-diagnose it.
+        if (-not $ok) { $code = 'install-healthz-failed' }
+        elseif (-not $reg) { $code = 'tunnel-not-registered' }
+        elseif (-not $coreInSession) { $code = 'core-not-in-target-session' }
+        else { $code = 'provision-incomplete' }
     }
     @{
-        stage          = 'installed'
-        success        = $success
-        error_code     = $code
-        message        = $msg
-        version        = [string]$stage['Version']
-        engine_version = [string]$kv['Version']
-        local_mcp_url  = "http://127.0.0.1:$Port/mcp"
-        public_mcp_url = $publicMcp
-        bearer_token   = $auth
-        oauth_password = $oauth
-        health         = [string]$kv['Health']
-        privilege_mode = [string]$kv['PrivilegeMode']
-        tunnel_mode    = $tunnelMode
-        install_exit   = 0
-        target_user    = $env:USERNAME
-        installed_at   = (Get-Date).ToUniversalTime().ToString('o')
-        updated_at     = (Get-Date).ToUniversalTime().ToString('o')
+        stage             = 'installed'
+        success           = $success
+        error_code        = $code
+        message           = $msg
+        version           = [string]$stage['Version']
+        engine_version    = [string]$kv['Version']
+        local_mcp_url     = "http://127.0.0.1:$Port/mcp"
+        public_mcp_url    = $publicMcp
+        bearer_token      = $auth
+        oauth_password    = $oauth
+        health            = [string]$kv['Health']
+        privilege_mode    = [string]$kv['PrivilegeMode']
+        tunnel_mode       = $tunnelMode
+        install_exit      = 0
+        target_user       = $env:USERNAME
+        # Runtime facts, so publish/keepalive have real values to compare
+        # (-OnlyIfChanged diffs core_alive / healthz_ok) instead of blanks.
+        core_alive        = ($coreSessions.Count -gt 0)
+        healthz_ok        = $ok
+        tunnel_registered = $reg
+        tunnel_evidence   = $regEv
+        installed_at      = (Get-Date).ToUniversalTime().ToString('o')
+        updated_at        = (Get-Date).ToUniversalTime().ToString('o')
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statusFile -Encoding utf8
 
     L "status_written=$statusFile"
