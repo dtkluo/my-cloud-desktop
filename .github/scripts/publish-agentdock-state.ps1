@@ -24,6 +24,7 @@ param(
     [string] $StatePath = 'runtime/cloud-desktop.json',
     [int]    $Port = 8765,
     [int]    $SessionHours = 6,
+    [string] $GyLoginFile = 'C:\agentdock-install\gy-login.json',
     [switch] $OnlyIfChanged
 )
 
@@ -112,6 +113,22 @@ $workflow  = if ($env:GITHUB_WORKFLOW) { $env:GITHUB_WORKFLOW } else { '' }
 $healthValue  = if ($healthOk) { 'healthy' } else { $status.health }
 $messageValue = if ($healthOk) { 'AgentDock 已就绪（MCP 可用）' } else { $status.message }
 
+# ---------- 光鸭 skill 登录诉求（由 guangya-skill-login.ps1 产出） ----------
+# 该 skill 是 AgentDock bundled，但登录态随 VM 重建丢失 ⇒ 每次开机需重新授权。
+# 这里把 user_code 同步出去，供**已登录的外部端**（本机 / 一加）代为批准（免扫码）。
+$gyState = 'none'; $gyUserCode = ''; $gyDeviceId = ''; $gyMessage = ''
+if ($GyLoginFile -and (Test-Path -LiteralPath $GyLoginFile)) {
+    try {
+        $gy = Get-Content -LiteralPath $GyLoginFile -Raw | ConvertFrom-Json
+        $gyState    = [string]$gy.state
+        $gyUserCode = [string]$gy.user_code
+        $gyDeviceId = [string]$gy.device_id
+        $gyMessage  = [string]$gy.message
+    } catch {
+        Write-Warning "光鸭登录状态文件解析失败：$($_.Exception.Message)"
+    }
+}
+
 $payload = [ordered]@{
     schema     = 1
     updated_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -141,6 +158,12 @@ $payload = [ordered]@{
         easytier_ip = $easytierIp
         socks5      = if ($easytierIp) { "socks5h://${easytierIp}:$socks5Port" } else { '' }
         rdp_user    = $env:RDP_USER
+    }
+    guangya_login = [ordered]@{
+        state      = $gyState
+        user_code  = $gyUserCode
+        device_id  = $gyDeviceId
+        message    = $gyMessage
     }
     prompt     = $prompt
 }
@@ -173,7 +196,12 @@ if ($OnlyIfChanged -and $null -ne $remoteJson) {
                  ($remoteJson.agentdock.core_alive -eq $coreAlive) -and
                  ($remoteJson.agentdock.healthz_ok -eq $healthOk) -and
                  ($remoteJson.agentdock.health -eq $healthValue) -and
-                 ($remoteJson.agentdock.message -eq $messageValue)
+                 ($remoteJson.agentdock.message -eq $messageValue) -and
+                 # 光鸭登录诉求必须纳入：state 从 none→awaiting→authorized 的变化，
+                 # 若不比较就会因"其他字段未变"被跳过提交，外部批准者永远读不到 user_code。
+                 ($remoteJson.guangya_login.state -eq $gyState) -and
+                 ($remoteJson.guangya_login.user_code -eq $gyUserCode) -and
+                 ($remoteJson.guangya_login.device_id -eq $gyDeviceId)
     if ($unchanged) {
         Write-Host '连接信息未发生变化，跳过提交。'
         exit 0

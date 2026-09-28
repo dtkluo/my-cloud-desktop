@@ -298,6 +298,21 @@ jobs:
             -Port 8765 `
             -TimeoutSec 300
 
+      - name: 5.6 光鸭云盘 skill 登录（申请设备码，等待外部批准）
+        if: ${{ github.event.inputs.agentdock != 'disabled' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          # guangya-pan 是 AgentDock 的 bundled skill（每台自带），只缺登录；
+          # 而本 VM 每次重建都会丢登录态 ⇒ 每次开机都要重新授权。
+          # 本步骤只「申请设备码 + 落盘 + 就地等 100s」，批准由外部已登录端完成
+          # （本机 _dl/gy_approve.py 读状态仓库的 user_code 调 /v1/user/device/authorize），
+          # 全程免扫码；没批准也不影响云桌面其他能力。
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/guangya-skill-login.ps1 `
+            -PollSeconds 100 `
+            -RegisterRepeating
+
       - name: 6. 生成 AI 助手连接提示词并同步到手机端
         if: ${{ github.event.inputs.agentdock != 'disabled' }}
         continue-on-error: true
