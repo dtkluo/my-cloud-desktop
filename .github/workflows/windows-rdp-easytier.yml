@@ -267,10 +267,10 @@ jobs:
       #
       #   失败不阻断：continue-on-error，用户仍可人工 RDP 兜底。
       # ======================================================================
-      - name: 5.5 自动建立 rdpadmin 交互会话（免人工 RDP）
+      - name: 5.5 以 rdpadmin 身份完成 provisioning（免人工 RDP）
         if: ${{ github.event.inputs.agentdock != 'disabled' }}
         continue-on-error: true
-        timeout-minutes: 6
+        timeout-minutes: 8
         shell: pwsh
         env:
           RDP_USER: ${{ secrets.RDP_USERNAME }}
@@ -289,11 +289,14 @@ jobs:
             exit 0
           }
 
-          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/wake-rdpadmin-session.ps1 `
+          # 说明：上一版用「环回 RDP（mstsc 连 127.0.0.1）」伪造一次登录，实测失败
+          # （跑满 180s 超时，且期间 RDP-Tcp 监听器零连接）。现改为直接用「保存密码」
+          # 的计划任务以 rdpadmin 身份跑 provisioning —— 不需要图形会话，也不需要登录。
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/provision-rdpadmin-nologon.ps1 `
             -User $user `
             -Password $pass `
             -Port 8765 `
-            -TimeoutSec 180
+            -TimeoutSec 300
 
       - name: 6. 生成 AI 助手连接提示词并同步到手机端
         if: ${{ github.event.inputs.agentdock != 'disabled' }}
