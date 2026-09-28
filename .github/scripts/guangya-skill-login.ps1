@@ -31,6 +31,10 @@ param(
 
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+# ⚠️ 关键：PS 5.1 通过管道把文本送给原生命令时默认会带 **UTF-8 BOM**，
+# 而 run.py 的 load_input() 用 json.loads 严格解析，遇到 BOM 直接报
+# "invalid JSON input: Unexpected UTF-8 BOM" ⇒ 必须用**无 BOM** 的 UTF8Encoding。
+try { $OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 # ---------- 定位 python / run.py / state ----------
 $py = (Get-Command python -ErrorAction SilentlyContinue |
@@ -67,17 +71,31 @@ try {
     }
 } catch { }
 
+# ⚠️ 踩过的坑：run.py 的 load_input() 用 json.loads 严格解析 stdin，
+# 而 PS 5.1 通过管道把文本送给原生命令时会带 **UTF-8 BOM**（且 $OutputEncoding 无效），
+# 直接报 "invalid JSON input: Unexpected UTF-8 BOM"。
+# ⇒ 改为：JSON 以 ASCII 落盘，再用 cmd 重定向喂 stdin（原始字节，不带 BOM）。
 function Invoke-Skill {
     param([string] $Action, [hashtable] $Extra = @{})
     $payload = @{ skill_action = $Action }
     foreach ($k in $Extra.Keys) { $payload[$k] = $Extra[$k] }
     $stdinJson = $payload | ConvertTo-Json -Compress -Depth 5
-    $raw = ''
+    $tag    = [guid]::NewGuid().ToString('N')
+    $tmpIn  = Join-Path $env:TEMP ("gyin_$tag.json")
+    $tmpOut = Join-Path $env:TEMP ("gyout_$tag.txt")
+    [IO.File]::WriteAllText($tmpIn, $stdinJson, [Text.Encoding]::ASCII)
     try {
-        $raw = ($stdinJson | & $py -X utf8 $SkillRun 2>&1 | Out-String)
+        & cmd.exe /c "`"$py`" -X utf8 `"$SkillRun`" < `"$tmpIn`" > `"$tmpOut`" 2>&1" | Out-Null
     } catch {
+        Remove-Item $tmpIn -Force -ErrorAction SilentlyContinue
         return @{ ok = $false; error = $_.Exception.Message }
     }
+    $raw = ''
+    if (Test-Path -LiteralPath $tmpOut) {
+        try { $raw = Get-Content -LiteralPath $tmpOut -Raw -Encoding UTF8 } catch { $raw = '' }
+    }
+    Remove-Item $tmpIn, $tmpOut -Force -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($raw)) { return @{ ok = $false; error = '无输出' } }
     $i = $raw.IndexOf('{'); $j = $raw.LastIndexOf('}')
     if ($i -lt 0 -or $j -lt $i) { return @{ ok = $false; error = '输出不是 JSON'; raw = $raw } }
     try {
