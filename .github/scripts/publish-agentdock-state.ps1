@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     把云桌面上的 AgentDock 连接信息与「AI 助手连接提示词」同步到私有仓库，
     供手机端 workflow-controller 读取并一键复制。
@@ -104,6 +104,14 @@ $runId     = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { '' }
 $runNumber = if ($env:GITHUB_RUN_NUMBER) { $env:GITHUB_RUN_NUMBER } else { '' }
 $workflow  = if ($env:GITHUB_WORKFLOW) { $env:GITHUB_WORKFLOW } else { '' }
 
+# ---------- health / message：以**实测 healthz** 为准，不盲信 status.json ----------
+# status.json 由 provision 脚本写入，实测比本步骤**晚约 1 秒**
+# （run#53：publish 02:59:30 读、status.json 02:59:31 才写完），
+# 直接照搬会把 staging 期的 "pending-logon" / "等待 rdpadmin 登录后安装" 当成终态
+# 同步出去，手机端就会显示"等待登录"而机器其实已经可用。
+$healthValue  = if ($healthOk) { 'healthy' } else { $status.health }
+$messageValue = if ($healthOk) { 'AgentDock 已就绪（MCP 可用）' } else { $status.message }
+
 $payload = [ordered]@{
     schema     = 1
     updated_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -117,7 +125,7 @@ $payload = [ordered]@{
         installed      = [bool] $status.success
         version        = $status.version
         tunnel_mode    = $status.tunnel_mode
-        health         = $status.health
+        health         = $healthValue
         core_alive     = $coreAlive
         healthz_ok     = $healthOk
         privilege_mode = $status.privilege_mode
@@ -126,7 +134,7 @@ $payload = [ordered]@{
         bearer_token   = $status.bearer_token
         oauth_password = $status.oauth_password
         error_code     = $status.error_code
-        message        = $status.message
+        message        = $messageValue
         installed_at   = $status.updated_at
     }
     cloud_desktop = [ordered]@{
@@ -158,10 +166,14 @@ try {
 }
 
 if ($OnlyIfChanged -and $null -ne $remoteJson) {
+    # health / message 必须纳入比较：它们是最容易滞后的字段，
+    # 只比 token/healthz_ok 会让陈旧的 pending-logon 永远得不到纠正。
     $unchanged = ($remoteJson.agentdock.public_mcp_url -eq $publicMcp) -and
                  ($remoteJson.agentdock.bearer_token -eq $status.bearer_token) -and
                  ($remoteJson.agentdock.core_alive -eq $coreAlive) -and
-                 ($remoteJson.agentdock.healthz_ok -eq $healthOk)
+                 ($remoteJson.agentdock.healthz_ok -eq $healthOk) -and
+                 ($remoteJson.agentdock.health -eq $healthValue) -and
+                 ($remoteJson.agentdock.message -eq $messageValue)
     if ($unchanged) {
         Write-Host '连接信息未发生变化，跳过提交。'
         exit 0
