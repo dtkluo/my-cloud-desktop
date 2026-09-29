@@ -298,20 +298,26 @@ jobs:
             -Port 8765 `
             -TimeoutSec 300
 
-      - name: 5.6 光鸭云盘 skill 登录（申请设备码，等待外部批准）
+      - name: 5.6 光鸭云盘 skill 登录态检测（只检测，按需授权）
         if: ${{ github.event.inputs.agentdock != 'disabled' }}
         continue-on-error: true
-        timeout-minutes: 6
+        timeout-minutes: 2
         shell: pwsh
         run: |
           # guangya-pan 是 AgentDock 的 bundled skill（每台自带），只缺登录；
-          # 而本 VM 每次重建都会丢登录态 ⇒ 每次开机都要重新授权。
-          # 本步骤只「申请设备码 + 落盘 + 就地等 100s」，批准由外部已登录端完成
-          # （本机 _dl/gy_approve.py 读状态仓库的 user_code 调 /v1/user/device/authorize），
-          # 全程免扫码；没批准也不影响云桌面其他能力。
+          # 而本 VM 每次重建都会丢登录态 ⇒ 每次开机都要重新授权一次。
+          #
+          # [v9 瘦身] 这里**只检测、不申请**。理由：批准方（本机 / 主人）在开机那一刻
+          #   并未上线，原「申请设备码 + 就地等 100s + 注册 3 分钟重试」是纯空等
+          #   （实测 run#57 本步骤耗时 114s，其中 100s 空转，最终仍靠外部批准才完成），
+          #   白白拖慢开机关键路径约 110s。
+          #   现在把「申请 -> 批准 -> 领取」整体推迟到**对话时按需执行**：
+          #       本机  python _dl/gy_ensure.py     # 秒级跑完整条链路，免扫码
+          #   本步骤只把真实登录态写进 gy-login.json（authorized / not_logged_in），
+          #   供步骤 6 同步到状态仓库，便于手机端与对话时判断是否需要补授权。
+          #   未登录不影响云桌面其他能力（AgentDock / MCP 照常可用）。
           pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/guangya-skill-login.ps1 `
-            -PollSeconds 100 `
-            -RegisterRepeating
+            -DetectOnly
 
       - name: 6. 生成 AI 助手连接提示词并同步到手机端
         if: ${{ github.event.inputs.agentdock != 'disabled' }}
