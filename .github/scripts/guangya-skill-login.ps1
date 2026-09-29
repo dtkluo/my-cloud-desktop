@@ -17,6 +17,7 @@
     用法：
       pwsh -File guangya-skill-login.ps1
       pwsh -File guangya-skill-login.ps1 -PollSeconds 120 -RegisterRepeating
+      pwsh -File guangya-skill-login.ps1 -DetectOnly   # 只检测（开机瘦身用）
 #>
 [CmdletBinding()]
 param(
@@ -26,6 +27,7 @@ param(
     [int]    $PollSeconds = 120,  # 申请设备码后就地等待批准的秒数
     [string] $TaskName    = 'GuangyaSkillLogin',
     [switch] $RegisterRepeating,  # 注册每 3 分钟重试的任务（等外部批准）
+    [switch] $DetectOnly,         # 只检测登录态并落盘（不申请/不注册/不等待）——workflow 步骤 5.6 用
     [string] $PasswordFile = 'C:\agentdock-install\rdp-password.txt'
 )
 
@@ -122,6 +124,26 @@ function Write-LoginFile {
 
 # ---------- 1) 已有凭据？ ----------
 $st = Invoke-Skill 'status'
+
+# ---------- 1.5) 只检测模式（workflow 步骤 5.6 用） ----------
+# 为什么开机不申请：批准方（本机 gy_ensure.py / 主人）在开机那一刻并未上线，
+# 原先「申请设备码 + 就地 login_poll 等 100s」是纯空等 —— 实测 run#57 本步骤
+# 耗时 114s，其中 100s 空转、最终仍靠外部批准才完成。
+# 故开机只做「检测 + 落盘」，把「申请 -> 批准 -> 领取」整体推迟到对话时按需执行：
+#   本机 python _dl/gy_ensure.py    # 秒级跑完整条链路
+if ($DetectOnly) {
+    if ($st.ok -and $st.has_credential) {
+        Write-LoginFile 'authorized' '' ([string]$st.device_id) '已登录'
+        Write-Host "[gy][detect] 已登录 device_id=$($st.device_id)"
+    } else {
+        $ls = ''
+        try { $ls = [string]$st.login_state } catch { }
+        Write-LoginFile 'not_logged_in' '' '' "未登录（按需授权：对话时由本机 gy_ensure.py 完成；login_state=$ls）"
+        Write-Host '[gy][detect] 未登录，已落盘；跳过申请与等待'
+    }
+    exit 0
+}
+
 if ($st.ok -and $st.has_credential) {
     Write-Host "[gy] 已登录：device_id=$($st.device_id)"
     Write-LoginFile 'authorized' '' ([string]$st.device_id) '已登录'
