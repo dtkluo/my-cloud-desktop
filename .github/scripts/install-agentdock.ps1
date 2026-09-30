@@ -52,7 +52,7 @@
 [CmdletBinding()]
 param(
     [string] $AgentDockRepo = 'dtkluo/agentdock-v2',
-    [string] $Version = 'v0.8.3-dev4',
+    [string] $Version = 'v0.8.3-dev5',
     [int]    $Port = 8765,
     [ValidateSet('named', 'quick', 'none')]
     [string] $TunnelMode = 'named',

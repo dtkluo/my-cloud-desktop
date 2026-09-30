@@ -55,7 +55,7 @@ name: Windows Cloud RDP (EasyTier Secure)
 #   AGENTDOCK_GH_TOKEN        【必需】可读私有 release、可写私有仓库文件的 PAT
 #   AGENTDOCK_TUNNEL_TOKEN    【named 模式必需】云桌面专属 Cloudflare Tunnel Token
 #   AGENTDOCK_PUBLIC_URL      【可选】覆盖默认固定域名 agent.yundn.dpdns.org（一般无需配置）
-#   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev4
+#   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev5
 #   AGENTDOCK_AUTH_TOKEN      【可选】固定 Bearer Token（不配置则每次随机）
 #   AGENTDOCK_OAUTH_PASSWORD  【可选】固定 OAuth 登录密码（不配置则每次随机）
 #   AGENTDOCK_STATUS_REPO     【可选】状态文件仓库；不配则用工作流顶层 env 的默认值
@@ -237,7 +237,7 @@ jobs:
           AGENTDOCK_OAUTH_PASSWORD: ${{ secrets.AGENTDOCK_OAUTH_PASSWORD }}
         run: |
           $version   = '${{ secrets.AGENTDOCK_VERSION }}'
-          if (-not $version) { $version = 'v0.8.3-dev4' }
+          if (-not $version) { $version = 'v0.8.3-dev5' }
           $tunnel    = '${{ github.event.inputs.agentdock_tunnel }}'
           if (-not $tunnel) { $tunnel = 'named' }
           $publicUrl = '${{ secrets.AGENTDOCK_PUBLIC_URL }}'
