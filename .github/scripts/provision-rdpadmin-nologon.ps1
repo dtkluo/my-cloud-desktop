@@ -47,7 +47,7 @@ param(
     [string] $TaskName = 'AgentDock-AutoProvision',
     [int]    $Port = 8765,
     [int]    $TimeoutSec = 300,
-    [int]    $PollIntervalSec = 10
+    [int]    $PollIntervalSec = 3
 )
 
 $ErrorActionPreference = 'Continue'
