@@ -55,7 +55,7 @@ name: Windows Cloud RDP (EasyTier Secure)
 #   AGENTDOCK_GH_TOKEN        【必需】可读私有 release、可写私有仓库文件的 PAT
 #   AGENTDOCK_TUNNEL_TOKEN    【named 模式必需】云桌面专属 Cloudflare Tunnel Token
 #   AGENTDOCK_PUBLIC_URL      【可选】覆盖默认固定域名 agent.yundn.dpdns.org（一般无需配置）
-#   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev5
+#   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev4
 #   AGENTDOCK_AUTH_TOKEN      【可选】固定 Bearer Token（不配置则每次随机）
 #   AGENTDOCK_OAUTH_PASSWORD  【可选】固定 OAuth 登录密码（不配置则每次随机）
 #   AGENTDOCK_STATUS_REPO     【可选】状态文件仓库；不配则用工作流顶层 env 的默认值
@@ -237,7 +237,7 @@ jobs:
           AGENTDOCK_OAUTH_PASSWORD: ${{ secrets.AGENTDOCK_OAUTH_PASSWORD }}
         run: |
           $version   = '${{ secrets.AGENTDOCK_VERSION }}'
-          if (-not $version) { $version = 'v0.8.3-dev5' }
+          if (-not $version) { $version = 'v0.8.3-dev4' }
           $tunnel    = '${{ github.event.inputs.agentdock_tunnel }}'
           if (-not $tunnel) { $tunnel = 'named' }
           $publicUrl = '${{ secrets.AGENTDOCK_PUBLIC_URL }}'
@@ -486,7 +486,11 @@ jobs:
           Remove-NetFirewallRule  -DisplayName "RDP-EasyTier-Only" -ErrorAction SilentlyContinue
           New-NetFirewallRule -DisplayName "RDP-EasyTier-Only" -Direction Inbound -Protocol TCP `
             -LocalPort 3389 -Action Allow -RemoteAddress $subnet | Out-Null
-          Write-Host "已限制：RDP(3389) 仅允许 $subnet"
+          # [v10] 同步放行 RDP 的 UDP 传输通道（RDP 8+ 会用 UDP 承载会话，抗丢包远优于纯 TCP）。
+          #       只放行 TCP 会把高丢包链路上的 RDP 卡成幻灯片（实测基线 245ms/间歇丢包）。
+          New-NetFirewallRule -DisplayName "RDP-EasyTier-Only-UDP" -Direction Inbound -Protocol UDP `
+            -LocalPort 3389 -Action Allow -RemoteAddress $subnet | Out-Null
+          Write-Host "已限制：RDP(3389 TCP+UDP) 仅允许 $subnet"
 
           # SOCKS5 监听地址在源码层被硬编码为 0.0.0.0，命令行无法收窄，
           # 因此这里用防火墙把入站来源限定在虚拟网段内。
