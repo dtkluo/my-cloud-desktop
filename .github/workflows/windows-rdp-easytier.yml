@@ -56,8 +56,11 @@ name: Windows Cloud RDP (EasyTier Secure)
 #   AGENTDOCK_TUNNEL_TOKEN    【named 模式必需】云桌面专属 Cloudflare Tunnel Token
 #   AGENTDOCK_PUBLIC_URL      【可选】覆盖默认固定域名 agent.yundn.dpdns.org（一般无需配置）
 #   AGENTDOCK_VERSION         【可选】定制版 tag，默认 v0.8.3-dev4
-#   AGENTDOCK_AUTH_TOKEN      【可选】固定 Bearer Token（不配置则每次随机）
-#   AGENTDOCK_OAUTH_PASSWORD  【可选】固定 OAuth 登录密码（不配置则每次随机）
+#   AGENTDOCK_AUTH_TOKEN / AGENTDOCK_OAUTH_PASSWORD
+#                             【已废弃】过去用于注入固定凭据，造成"每次开机凭证都一样"。
+#                             2026-10-20 起不再注入：由 install-agentdock.ps1 每次开机用
+#                             CSPRNG 生成并缓存于 C:\agentdock-install，经 status.json
+#                             → 状态仓库自动分发。仓库里这两个 secret 可直接删除。
 #   AGENTDOCK_STATUS_REPO     【可选】状态文件仓库；不配则用工作流顶层 env 的默认值
 #   AGENTDOCK_STATUS_PATH     【可选】状态文件路径；不配则用工作流顶层 env 的默认值
 #                             （默认值单点定义在顶层 env，本文件其它位置不再重复写）
@@ -233,8 +236,6 @@ jobs:
         env:
           AGENTDOCK_GH_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
           AGENTDOCK_TUNNEL_TOKEN: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN }}
-          AGENTDOCK_AUTH_TOKEN: ${{ secrets.AGENTDOCK_AUTH_TOKEN }}
-          AGENTDOCK_OAUTH_PASSWORD: ${{ secrets.AGENTDOCK_OAUTH_PASSWORD }}
         run: |
           $version   = '${{ secrets.AGENTDOCK_VERSION }}'
           if (-not $version) { $version = 'v0.8.3-dev4' }
@@ -354,8 +355,6 @@ jobs:
           STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
           AGENTDOCK_GH_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
           AGENTDOCK_TUNNEL_TOKEN: ${{ secrets.AGENTDOCK_TUNNEL_TOKEN }}
-          AGENTDOCK_AUTH_TOKEN: ${{ secrets.AGENTDOCK_AUTH_TOKEN }}
-          AGENTDOCK_OAUTH_PASSWORD: ${{ secrets.AGENTDOCK_OAUTH_PASSWORD }}
           # 刻意不在此声明 AGENTDOCK_STATUS_*：顶层 env 已定义（含默认值），
           # step 级同名变量会用它（此处为空）覆盖顶层值，使默认值失效。
           RDP_USER: ${{ secrets.RDP_USERNAME }}
