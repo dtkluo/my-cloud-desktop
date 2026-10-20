@@ -27,7 +27,7 @@
            provision-agentdock-user.ps1 完成安装与启动；
         4. 若目标用户此刻已有活动会话，立即触发一次；
         5. 写一份**预期值**的 status.json（health=pending-logon），使第 6 步同步给手机端
-           的连接提示词在开机阶段就可用（Bearer Token 是固定 secret，与谁在跑无关）。
+           的连接提示词在开机阶段就可用（Bearer Token 由本脚本按开机轮换生成，与谁在跑无关）。
 
     -TargetUser 传空串或等于当前用户即回到旧行为（就地安装，供排查/兼容用）。
 
@@ -40,14 +40,15 @@
       AGENTDOCK_GH_TOKEN       具备读取私有 release 权限的 PAT
     可选环境变量：
       AGENTDOCK_TUNNEL_TOKEN   named 模式必需（cloudflared tunnel token）
-      AGENTDOCK_AUTH_TOKEN     固定 Bearer Token（不传则本次生成并固化到暂存文件）
-      AGENTDOCK_OAUTH_PASSWORD 固定 OAuth 登录密码（同上）
+      AGENTDOCK_AUTH_TOKEN     【已废弃】固定 Bearer Token（显式覆盖用；默认按开机轮换）
+      AGENTDOCK_OAUTH_PASSWORD 【已废弃】固定 OAuth 登录密码（同上）
       RDP_USER                 目标账号名；若工作流透传则**优先于** -TargetUser
     named 模式的公网地址：-PublicUrl 缺省即用内置的云桌面专属固定域名，
       无需额外配置；如需换域名再显式传入覆盖。
     输出：
       <WorkDirectory>\status.json   安装结果（含凭据，仅本机/私有仓库可见）
       <WorkDirectory>\rdpadmin-stage.ini / tunnel.token / named-server-url.txt / install-mode.txt
+      <WorkDirectory>\auth-token.txt / oauth-password.txt  （本次开机的凭据缓存，用于内部一致性）
 #>
 [CmdletBinding()]
 param(
@@ -296,17 +297,43 @@ if ($expected -ne $actual) { throw "SHA256 校验失败：期望 $expected，实
 Write-Host 'OK：离线包 SHA256 校验通过'
 
 # ---------- 4. 凭据与服务地址（就地与 staged 共用） ----------
-# 凭据优先取环境变量；未提供则本次生成并固化到暂存文件，保证「同一次部署」内部一致。
-$authToken = $env:AGENTDOCK_AUTH_TOKEN
-if ([string]::IsNullOrWhiteSpace($authToken)) {
-    $authToken = -join (1..64 | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
-    Write-Host '未提供 AGENTDOCK_AUTH_TOKEN，本次生成 64 位十六进制令牌并固化到暂存文件。'
+# 凭据策略（2026-10-20 修订）：**每次开机轮换，同一开机内保持一致**。
+#   * 不再由工作流注入固定 secret ⇒ 磁盘每次重建即换新凭据，泄露的凭据最多存活一个会话；
+#   * 本脚本把凭据缓存在 WorkDirectory 内，staged / 就地安装 / 保活重装 都复用同一份，
+#     避免中途重装导致已发布到状态仓库的凭据失效；
+#   * 用 CSPRNG（RandomNumberGenerator）生成，不用 Get-Random；
+#   * 环境变量仍可显式覆盖（手工排查/固定凭据自测时用），但工作流默认不再传。
+function New-BootSecret {
+    param([int] $ByteCount = 32)
+    $bytes = New-Object byte[] $ByteCount
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
 }
-$oauthPassword = $env:AGENTDOCK_OAUTH_PASSWORD
-if ([string]::IsNullOrWhiteSpace($oauthPassword)) {
-    $oauthPassword = -join (1..32 | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
-    Write-Host '未提供 AGENTDOCK_OAUTH_PASSWORD，本次生成 32 位十六进制密码并固化到暂存文件。'
+
+function Get-OrCreateBootSecret {
+    param([string] $Label, [string] $FileName, [string] $EnvValue, [int] $ByteCount)
+    if (-not [string]::IsNullOrWhiteSpace($EnvValue)) {
+        Write-Host ("{0}：使用环境变量提供的值。" -f $Label)
+        return $EnvValue.Trim()
+    }
+    $cacheFile = Join-Path $work $FileName
+    if (Test-Path -LiteralPath $cacheFile) {
+        $cached = Get-Content -LiteralPath $cacheFile -Raw -ErrorAction SilentlyContinue
+        if ($cached) { $cached = $cached.Trim() }
+        if (-not [string]::IsNullOrWhiteSpace($cached)) {
+            Write-Host ("{0}：复用本次开机已生成的凭据（不跨重启）。" -f $Label)
+            return $cached
+        }
+    }
+    $value = New-BootSecret -ByteCount $ByteCount
+    [IO.File]::WriteAllText($cacheFile, $value, [Text.UTF8Encoding]::new($false))
+    Write-Host ("{0}：已轮换生成新凭据（{1} 字符）。" -f $Label, $value.Length)
+    return $value
 }
+
+$authToken     = Get-OrCreateBootSecret -Label 'Bearer Token'   -FileName 'auth-token.txt'     -EnvValue $env:AGENTDOCK_AUTH_TOKEN     -ByteCount 32
+$oauthPassword = Get-OrCreateBootSecret -Label 'OAuth 登录密码' -FileName 'oauth-password.txt' -EnvValue $env:AGENTDOCK_OAUTH_PASSWORD -ByteCount 16
 
 # 未传 -PublicUrl 或显式传空串（保活重装时状态里可能没有公网地址）都回落到内置默认域名。
 # 若放任为空，install.ps1 会走 Read-Host 交互分支，在 CI 里挂死。
@@ -529,7 +556,7 @@ if ($sessionActive) {
 }
 
 # 9.6 写预期值的 status.json —— 让第 6 步能把可用的连接信息同步给手机端
-#     （Bearer Token 来自固定 secret，与谁在跑无关，所以开机阶段即可用）
+#     （Bearer Token 按开机轮换且在本脚本内生成，与谁在跑无关，所以开机阶段即可用）
 $publicMcpUrl = if ($TunnelMode -ne 'none') { $PublicUrl } else { '' }
 Write-Status -Status @{
     stage            = 'staged'
