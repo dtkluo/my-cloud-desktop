@@ -106,6 +106,26 @@ $runId     = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { '' }
 $runNumber = if ($env:GITHUB_RUN_NUMBER) { $env:GITHUB_RUN_NUMBER } else { '' }
 $workflow  = if ($env:GITHUB_WORKFLOW) { $env:GITHUB_WORKFLOW } else { '' }
 
+# 在 Actions 之外手工执行（排障/补发布）时没有 GITHUB_* 环境变量。
+# 此时若直接写空值，状态文件的 session 段会被清空，手机端就显示"上次会话:失败"。
+# 因此缺值时从远端现有文件继承，保证手工发布不会破坏会话信息。
+if (-not $workflow -or -not $runId) {
+    try {
+        $hdr = @{ Authorization = "Bearer $($env:STATE_TOKEN)"; 'User-Agent' = 'agentdock-publish'; Accept = 'application/vnd.github+json' }
+        $uri = "https://api.github.com/repos/$StateRepo/contents/$StatePath"
+        $resp = Invoke-RestMethod -Uri $uri -Headers $hdr -Method Get -TimeoutSec 20
+        $prev = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($resp.content -replace '\s', ''))) | ConvertFrom-Json)
+        if ($prev.session) {
+            if (-not $workflow)  { $workflow  = [string]$prev.session.workflow }
+            if (-not $runId)     { $runId     = [string]$prev.session.run_id }
+            if (-not $runNumber) { $runNumber = [string]$prev.session.run_number }
+            Write-Host "  session 段继承自现有状态文件：$workflow #$runNumber ($runId)"
+        }
+    } catch {
+        Write-Warning "无法从现有状态文件继承 session 段：$($_.Exception.Message)"
+    }
+}
+
 # ---------- health / message：以**实测 healthz** 为准，不盲信 status.json ----------
 # status.json 由 provision 脚本写入，实测比本步骤**晚约 1 秒**
 # （run#53：publish 02:59:30 读、status.json 02:59:31 才写完），
