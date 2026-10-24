@@ -146,7 +146,7 @@ if ($PiikStateFile -and (Test-Path -LiteralPath $PiikStateFile)) {
         $piikAudio  = [bool]$pk.audio
         $piikRemote = [bool]$pk.remote_control
         if ($piikState -eq 'sharing' -and $piikUrl) {
-            $piikMsg = '浏览器远控已就绪（' + $piikRes + 'p' + $piikFps + '，密码 ' + $piikPass + '）'
+            $piikMsg = '浏览器远控已就绪（' + $piikRes + ' · ' + $piikFps + 'fps，密码 ' + $piikPass + '）'
             if (-not $piikRemote) { $piikMsg = '分享中，但远控未开启' }
         } elseif ($piikState -eq 'failed') { $piikMsg = 'Piik 启动失败：' + [string]$pk.error }
         else { $piikMsg = 'Piik 启动中' }
