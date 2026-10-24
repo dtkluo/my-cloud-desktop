@@ -25,7 +25,8 @@ param(
     [int]    $Port = 8765,
     [int]    $SessionHours = 6,
     [string] $GyLoginFile = 'C:\agentdock-install\gy-login.json',
-    [switch] $OnlyIfChanged
+    [switch] $OnlyIfChanged,
+    [string] $PiikStateFile = 'C://piik-auto//piik.json'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,6 +130,31 @@ if ($GyLoginFile -and (Test-Path -LiteralPath $GyLoginFile)) {
     }
 }
 
+# ---------- Piik 自动分享状态（由 start-piik-host.ps1 产出） ----------
+$piikState = 'off'; $piikUrl = ''; $piikSite = ''; $piikRoom = ''; $piikPass = ''
+$piikRes = ''; $piikFps = 0; $piikAudio = $false; $piikRemote = $false; $piikMsg = ''
+if ($PiikStateFile -and (Test-Path -LiteralPath $PiikStateFile)) {
+    try {
+        $pk = Get-Content -LiteralPath $PiikStateFile -Raw | ConvertFrom-Json
+        $piikState  = if ($pk.state) { [string]$pk.state } else { 'unknown' }
+        $piikUrl    = [string]$pk.url
+        $piikSite   = [string]$pk.site
+        $piikRoom   = [string]$pk.room_code
+        $piikPass   = [string]$pk.password
+        $piikRes    = [string]$pk.resolution
+        $piikFps    = [int]$pk.fps
+        $piikAudio  = [bool]$pk.audio
+        $piikRemote = [bool]$pk.remote_control
+        if ($piikState -eq 'sharing' -and $piikUrl) {
+            $piikMsg = '浏览器远控已就绪（' + $piikRes + 'p' + $piikFps + '，密码 ' + $piikPass + '）'
+            if (-not $piikRemote) { $piikMsg = '分享中，但远控未开启' }
+        } elseif ($piikState -eq 'failed') { $piikMsg = 'Piik 启动失败：' + [string]$pk.error }
+        else { $piikMsg = 'Piik 启动中' }
+    } catch {
+        Write-Warning "Piik 状态文件解析失败：$($_.Exception.Message)"
+    }
+}
+
 $payload = [ordered]@{
     schema     = 1
     updated_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -201,7 +227,11 @@ if ($OnlyIfChanged -and $null -ne $remoteJson) {
                  # 若不比较就会因"其他字段未变"被跳过提交，外部批准者永远读不到 user_code。
                  ($remoteJson.guangya_login.state -eq $gyState) -and
                  ($remoteJson.guangya_login.user_code -eq $gyUserCode) -and
-                 ($remoteJson.guangya_login.device_id -eq $gyDeviceId)
+                 ($remoteJson.guangya_login.device_id -eq $gyDeviceId) -and
+                 # Piik 链接随每次开机变化（trycloudflare 临时域名），必须参与比较
+                 ($remoteJson.piik.url -eq $piikUrl) -and
+                 ($remoteJson.piik.state -eq $piikState) -and
+                 ($remoteJson.piik.remote_control -eq $piikRemote)
     if ($unchanged) {
         Write-Host '连接信息未发生变化，跳过提交。'
         exit 0
