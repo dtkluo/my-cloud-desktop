@@ -674,7 +674,11 @@ jobs:
           Write-Host "  连接方式     : mstsc -> 输入 $vip"
           Write-Host "=========================================="
 
-          Write-Host ""
+          if (Test-Path 'C:\piik-auto\audio.json') {
+            Write-Host "  -- 音频设备状态 --"
+            (Get-Content 'C:\piik-auto\audio.json' -Raw) -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
+          }
+
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
           $totalMinutes   = $hours * 60
