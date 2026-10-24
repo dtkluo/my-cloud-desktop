@@ -204,9 +204,11 @@ try {
   await sleep(2500);
   await step('preset', () => cdp.eval(CLICKP(CFG.preset)));
   await sleep(2000);
-  R.resolution = (await cdp.eval(`(function(){var i=[].slice.call(document.querySelectorAll('input[aria-label="Width limit in pixels"]'))[0];return i? i.value:'';})()`)) || '';
+  const w = (await cdp.eval(`(function(){var i=[].slice.call(document.querySelectorAll('input[aria-label="Width limit in pixels"]'))[0];return i? i.value:'';})()`)) || '';
+  const h = (await cdp.eval(`(function(){var i=[].slice.call(document.querySelectorAll('input[aria-label="Height limit in pixels"]'))[0];return i? i.value:'';})()`)) || '';
   R.fps = Number((await cdp.eval(`(function(){var i=[].slice.call(document.querySelectorAll('input[aria-label="FPS limit"]'))[0];return i? i.value:'0';})()`)) || 0);
-  R.preset = R.resolution ? R.resolution + 'p' + (R.fps ? R.fps : '') : '';
+  R.resolution = w && h ? (w + 'x' + h) : '';
+  R.preset = R.resolution ? (R.resolution + '@' + (R.fps || 0) + 'fps') : '';
 
   // 4. system sound: only flip if it is off; a GPU-less VM may have no audio endpoint
   let sw = await cdp.eval(SWITCH_STATE('System sound')).catch(() => 'NA');
