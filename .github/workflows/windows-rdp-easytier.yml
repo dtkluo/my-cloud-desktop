@@ -1,4 +1,4 @@
-name: Windows Cloud RDP (EasyTier Secure)
+﻿name: Windows Cloud RDP (EasyTier Secure)
 
 # ============================================================================
 # v8 变更（相对 v7）
@@ -673,6 +673,31 @@ jobs:
           Write-Host "  客户端配置   : 出口节点留空；自定义路由留空；代理指向上面地址"
           Write-Host "  连接方式     : mstsc -> 输入 $vip"
           Write-Host "=========================================="
+
+          # ---------- E2. 启动 Piik 浏览器远控 ----------
+          # 必须放在 EasyTier 就绪之后：--lan-address 会校验该 IPv4 是否为活动网卡地址，
+          # 提前启动会因找不到 192.168.110.88 而拒绝启动。
+          Write-Host ""
+          Write-Host "===== E2. 启动 Piik 自动分享（浏览器远程控制）====="
+          try {
+            $piikArgs = @{ LanAddress = $vip; TimeoutSec = 240 }
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/start-piik-host.ps1 @piikArgs
+            Write-Host "start-piik-host.ps1 exit=$LASTEXITCODE"
+          } catch {
+            Write-Warning "Piik 启动异常（不影响 RDP/AgentDock）：$($_.Exception.Message)"
+          }
+          if (Test-Path 'C:\piik-auto\piik.json') {
+            Write-Host "  -- Piik 结果 --"
+            (Get-Content 'C:\piik-auto\piik.json' -Raw) -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
+          }
+          # 立即把 Piik 链接写进状态文件，手机端无需等下一次 keepalive（最长 1 分钟）
+          try {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/publish-agentdock-state.ps1 `
+                -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
+                -SessionHours $hours -Port 8765 -OnlyIfChanged
+          } catch {
+            Write-Warning "Piik 状态同步失败（不影响云桌面）：$($_.Exception.Message)"
+          }
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
