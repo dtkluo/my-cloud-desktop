@@ -1,4 +1,4 @@
-# 安装 VB-Audio Virtual Cable，让无音频设备的 Hyper-V 虚机拥有渲染端点，
+﻿# 安装 VB-Audio Virtual Cable，让无音频设备的 Hyper-V 虚机拥有渲染端点，
 # 从而 Piik 的 "System sound" 能通过 WASAPI loopback 采到桌面声音。
 # 幂等 + 失败不致命：已装则跳过；失败只写 audio.json 的 skipped 标记，不中断工作流。
 [CmdletBinding()]
