@@ -674,29 +674,22 @@ jobs:
           Write-Host "  连接方式     : mstsc -> 输入 $vip"
           Write-Host "=========================================="
 
-          # ---------- E2. 启动 Piik 浏览器远控 ----------
-          # 必须放在 EasyTier 就绪之后：--lan-address 会校验该 IPv4 是否为活动网卡地址，
-          # 提前启动会因找不到 192.168.110.88 而拒绝启动。
+          # ---------- E1.5. 虚拟声卡（让 Piik 能分享系统声音）----------
+          # 该镜像是 Hyper-V 虚机：Win32_SoundDevice 为 0、无任何音频端点 ⇒ Piik 的
+          # System sound 采不到东西。装 VB-Audio Virtual Cable 作为唯一渲染端点后，
+          # Windows 自动把它设为默认输出，WASAPI loopback 就能采到桌面声音。
+          # 失败不致命：只是没声音，画面与键鼠远控照常。
           Write-Host ""
-          Write-Host "===== E2. 启动 Piik 自动分享（浏览器远程控制）====="
+          Write-Host "===== E1.5. 安装虚拟声卡（Piik 系统声音）====="
           try {
-            $piikScript = Join-Path '.github/scripts' 'start-piik-host.ps1'
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File $piikScript -LanAddress $vip -TimeoutSec 240
-            Write-Host "start-piik-host.ps1 exit=$LASTEXITCODE"
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/install-virtual-audio.ps1
+            Write-Host "install-virtual-audio.ps1 exit=$LASTEXITCODE"
           } catch {
-            Write-Warning "Piik 启动异常（不影响 RDP/AgentDock）：$($_.Exception.Message)"
+            Write-Warning "虚拟声卡安装异常（不影响画面/键控）：$($_.Exception.Message)"
           }
-          if (Test-Path 'C:\piik-auto\piik.json') {
-            Write-Host "  -- Piik 结果 --"
-            (Get-Content 'C:\piik-auto\piik.json' -Raw) -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
-          }
-          # 立即把 Piik 链接写进状态文件，手机端无需等下一次 keepalive（最长 1 分钟）
-          try {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/publish-agentdock-state.ps1 `
-                -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
-                -SessionHours $hours -Port 8765 -OnlyIfChanged
-          } catch {
-            Write-Warning "Piik 状态同步失败（不影响云桌面）：$($_.Exception.Message)"
+          if (Test-Path 'C:\piik-auto\audio.json') {
+            Write-Host "  -- 音频设备状态 --"
+            (Get-Content 'C:\piik-auto\audio.json' -Raw) -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
           }
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
