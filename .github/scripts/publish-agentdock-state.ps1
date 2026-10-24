@@ -26,7 +26,7 @@ param(
     [int]    $SessionHours = 6,
     [string] $GyLoginFile = 'C:\agentdock-install\gy-login.json',
     [switch] $OnlyIfChanged,
-    [string] $PiikStateFile = 'C://piik-auto//piik.json'
+    [string] $PiikStateFile = 'C:\piik-auto\piik.json'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -190,6 +190,18 @@ $payload = [ordered]@{
         user_code  = $gyUserCode
         device_id  = $gyDeviceId
         message    = $gyMessage
+    }
+    piik = [ordered]@{
+        state          = $piikState
+        url            = $piikUrl
+        site           = $piikSite
+        room_code      = $piikRoom
+        password       = $piikPass
+        resolution     = $piikRes
+        fps            = $piikFps
+        audio          = $piikAudio
+        remote_control = $piikRemote
+        message        = $piikMsg
     }
     prompt     = $prompt
 }
