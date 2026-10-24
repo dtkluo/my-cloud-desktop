@@ -674,7 +674,7 @@ jobs:
           Write-Host "  连接方式     : mstsc -> 输入 $vip"
           Write-Host "=========================================="
 
-          # bisect marker only
+          Write-Host ""
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
           $totalMinutes   = $hours * 60
