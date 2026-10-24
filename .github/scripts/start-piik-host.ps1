@@ -79,6 +79,10 @@ try {
 
   $appArgs = "--link --port $Port"
   if ($LanAddress) { $appArgs += " --lan-address $LanAddress" }
+  # 常开诊断日志：ICE 候选类型（host/srflx/relay）是排查「无媒体线路」的唯一硬证据
+  $logDir = Join-Path $work 'logs'
+  New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+  $appArgs += " -debug -log-dir $logDir"
   $launchApp = @"
 `$ErrorActionPreference='Continue'
 Get-Process piik-app -ErrorAction SilentlyContinue | Stop-Process -Force
