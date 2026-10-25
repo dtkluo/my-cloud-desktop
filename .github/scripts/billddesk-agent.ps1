@@ -214,6 +214,48 @@ if (-not $geo) {
 L ('rect=' + $geo.W + 'x' + $geo.H + ' after ' + $rectTries + ' tries')
 L ("geo={0}x{1}+{2}+{3}" -f $geo.W, $geo.H, $geo.L, $geo.T)
 
+# ---------- 2.5 关闭「消息中心」弹窗 ----------
+# 全新安装首次启动会弹「消息中心」对话框，恰好盖住设备码（2026-10-26 实测，
+# OCR 只能读到弹窗文字，整轮白跑）。弹窗特征：纯白(255)背景 + 右上角 × 图标，
+# × 灰度 lum<110（半透明遮罩是均匀的 127 灰，不会命中），600 基准下在
+# x[430,441] y[203,213]。窄扫描窗口 x[0.70W,0.75W] y[0.32H,0.38H] 只认
+# × 形状的小簇（<=24px），命中才点击，无弹窗时该区域是白色卡片不会误点。
+$popTries = 0
+while ($popTries -lt 3) {
+  $popTries++
+  $px0 = [int]($geo.W * 0.70); $px1 = [int]($geo.W * 0.75)
+  $py0 = [int]($geo.H * 0.32); $py1 = [int]($geo.H * 0.38)
+  $bmp = New-Object System.Drawing.Bitmap($geo.W, $geo.H)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.DrawImage([System.Drawing.Image]::FromFile($shotPath), 0, 0)
+  $g.Dispose()
+  $xs = @(); $ys = @()
+  for ($y = $py0; $y -le $py1; $y++) {
+    for ($x = $px0; $x -le $px1; $x++) {
+      $c = $bmp.GetPixel($x, $y)
+      $lum = 0.299 * $c.R + 0.587 * $c.G + 0.114 * $c.B
+      if ($lum -lt 110) { $xs += $x; $ys += $y }
+    }
+  }
+  $bmp.Dispose()
+  if ($xs.Count -lt 6) { L ('popup: none (try ' + $popTries + ' pts=' + $xs.Count + ')'); break }
+  $minX = ($xs | Measure-Object -Minimum).Minimum
+  $maxX = ($xs | Measure-Object -Maximum).Maximum
+  $minY = ($ys | Measure-Object -Minimum).Minimum
+  $maxY = ($ys | Measure-Object -Maximum).Maximum
+  if (($maxX - $minX) -gt 24 -or ($maxY - $minY) -gt 24) {
+    L ('popup: dark blob too big w=' + ($maxX - $minX) + ' h=' + ($maxY - $minY) + ', skip')
+    break
+  }
+  $ax = $geo.L + [int](($minX + $maxX) / 2)
+  $ay = $geo.T + [int](($minY + $maxY) / 2)
+  L ('popup: cross at ' + [int](($minX + $maxX) / 2) + ',' + [int](($minY + $maxY) / 2) + ' -> click ' + $ax + ',' + $ay)
+  [BdWin]::Click($ax, $ay)
+  Start-Sleep -Milliseconds 1200
+  $geo = Shot $shotPath
+  if (-not $geo) { L 'popup: shot failed after click'; break }
+}
+
 $lines = OcrImage $shotPath
 foreach ($ln in $lines) { L ('  ocr| ' + $ln.Text) }
 
