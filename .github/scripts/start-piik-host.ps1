@@ -12,7 +12,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$ZipUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/piik-runtime-v5/piik-runtime.zip',
+  [string]$ZipUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/piik-runtime-v6/piik-runtime.zip',
   [string]$InstallDir = 'D:\piik',
   [int]$Port = 8787,
   [int]$CdpPort = 9223,
