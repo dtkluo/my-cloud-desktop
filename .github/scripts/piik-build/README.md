@@ -1,8 +1,8 @@
 # Piik 补丁构建（远控稳定性）
 
 云桌面上的 Piik 不是官方原版，而是**上游 v2.4.1 源码 + 本地修复**编译出来的
-`piik-app.exe`。产物发布在 Release `piik-runtime-v3`，`start-piik-host.ps1` 从这里下载
-（v1 / v2 保留可回滚）。
+`piik-app.exe`。产物发布在 Release `piik-runtime-v4`，`start-piik-host.ps1` 从这里下载
+（v1 / v2 / v3 保留可回滚）。
 
 ## 为什么要改
 
@@ -102,3 +102,35 @@ v2.4.1 的 4ms 节流反而让这条更容易触发。
 验证：`npx tsc -b`、`npm run build:web`、`npx vitest run`（1760 通过；4 条 archive/release-automation
 用例依赖 git 历史与 Unix 权限，在 tar 解压目录里本来就失败）。上线后在公网链接上抓
 `ViewerPage-*.js` 分包，确认含 `lr-remote-touch-actions` 与中文「右键/中键/双击」。
+
+## v4（2026-10-25 晚）：掉权仍在 → 补上真正漏掉的三处
+
+v3 只改了 `input-session.ts` 一处「队列积压就关通道」，重读传输层发现**同一条链路上还有三处**，
+而它们关闭的是上游 DataChannel —— 关掉上游等于把整个输入端点退役，本页无法重建，只能刷新邀请链接：
+
+| 位置 | 旧行为 | 新行为 |
+|---|---|---|
+| `input-route.ts` `send()` | `bufferedAmount > 8192` → `channel.close()` | 丢包；控制包上限 256KB，数据包 32KB |
+| `EncryptedInput.send()` | `catch` 里 `this.close()` | 丢弃该样本，等下一个 |
+| `EncryptedInput.receive()` | 入向超 8KB `close()` | 丢弃该快照（状态是 level-triggered） |
+
+**第二条根因：epoch 每个端点实例重新随机。** `refreshEndpoint()` 每次重建 `EncryptedInput` 都会换 epoch，
+而 Host 的 `receivePacket` 一旦看到 `c.epoch != packet.Epoch` 就 `m.revoke(c)` —— 于是 ICE 重新协商换一条
+数据通道，授权就被撤掉。改为**epoch 归属身份**（`reAuthenticate` 时才换），端点重建后 Host 看到的是同一
+endpoint + 同一 epoch + 递增序号，授权自然延续。
+
+**第三条：自动重取的定时器被状态推送饿死。** 旧实现把 `setTimeout` 放在 effect 里返回 cleanup，
+而 `state` 每推送一次都是新对象 ⇒ effect 重跑 ⇒ 定时器被清掉重排。抖动时 Host 会连推多条状态，
+800ms 窗口永远等不到 ⇒ 看着像「再也不自动恢复」。改为定时器挂 `useRef`，并加退避重试
+（0.8s / 0.8s / 2s / 4s…，上限 20 次），room 模式下 pending 超过 6 秒也会重发请求。
+
+另外补：切回页面时若视频仍暂停就 `video.play()` —— `presentation !== "playing"` 会让 `canControl` 直接为 false，
+控制入口整块禁用，用户感知同样是「掉权」。
+
+**触屏：把「中键」换成滚动拨盘。** 三段式：正三角（一档 = 120）/ 相对滑块（每 12px 两档，最多 ±1200）/ 倒三角。
+滑块是相对拨盘而非滚动条（滚轮注入无位置概念），抬手弹回中央。整体用 `margin-bottom: clamp(58px, 20vh, 168px)`
+抬到底部上方约五分之一屏 —— 贴着底边的大屏手机拇指够不到。
+
+验证：`tsc -b` ✅、`npm run build:web` ✅、`vitest` 1765 通过（4 条 archive/release-automation 依赖 git 历史与
+Unix 权限，在 tar 解压目录里本来就失败）。新增 `tests/remote-wheel-jog.test.ts` 4 条、`remote-input.test.ts`
+增加「背压不关上游」1 条，并把「重建后 epoch 应变化」改为「必须保持一致」。
