@@ -679,7 +679,7 @@ jobs:
           # Must run after EasyTier is up: --lan-address validates the IPv4 is bound.
           Write-Host ""
           Write-Host "===== E1.5 + E2. 虚拟声卡 + Piik 自动分享（浏览器远程控制）====="
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/piik-bootstrap.ps1 -LanAddress $vip -SessionHours $hours -Port 8765
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/piik-bootstrap.ps1 -LanAddress $vip -SessionHours $hours
           Write-Host "piik-bootstrap.ps1 exit=$LASTEXITCODE"
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
