@@ -341,6 +341,51 @@ jobs:
             -Port 8765
 
       # ======================================================================
+      # [v10 新增] 网页端 RDP（Apache Guacamole）—— 异步部署，不进关键路径。
+      #
+      # 为什么必须异步：
+      #   本步骤如果同步执行，5-8 分钟的 WSL + Docker 冷启动会把**步骤 7 推迟**，
+      #   而步骤 7 才真正拉起 EasyTier —— 等于「能连得上」本身慢 5-8 分钟。
+      #   所以这里只注册一个 5 秒后执行的一次性计划任务就返回（实测 <3s），
+      #   Guacamole 在后台自己装，装完自己把 guac.url 补推到手机端。
+      #   ⇒ 开机到可连的时间与引入本功能之前完全一致（增量 ≈ 0）。
+      #
+      # 前置依赖（同目录已提交）：
+      #   .github/scripts/guac/guac-schedule.ps1   本步骤调用
+      #   .github/scripts/guac/guac-bootstrap.ps1  后台真正干活的（也可放 scripts 根）
+      #   .github/scripts/guac/guac-deploy.sh      WSL 侧部署模板
+      #   .github/scripts/publish-agentdock-state.ps1 需支持 guac 段（已改）
+      #
+      # 需要的 secrets：RDP_PASSWORD（已有）、GUAC_WEB_PASS（网页登录密码，可选，缺省同 RDP 密码）
+      # 可选加速：把 guac-images.tar.gz 传 Release 后，在 env 里填 GUAC_IMAGE_BUNDLE
+      # ======================================================================
+      - name: 6.5 网页端 RDP 后台部署（不阻塞主链路）
+        if: ${{ github.event.inputs.agentdock != 'disabled' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: pwsh
+        env:
+          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          GUAC_PASS: ${{ secrets.GUAC_WEB_PASS }}
+          GUAC_IMAGE_BUNDLE: ${{ vars.GUAC_IMAGE_BUNDLE }}
+        run: |
+          $user = if ($env:RDP_USER) { $env:RDP_USER } else { 'rdpadmin' }
+          $pass = $env:RDP_PASS
+          if (-not $pass -and (Test-Path 'C:\agentdock-install\rdp-password.txt')) {
+            $pass = (Get-Content 'C:\agentdock-install\rdp-password.txt' -Raw).Trim()
+          }
+          if (-not $pass) { Write-Warning '拿不到 rdpadmin 密码，跳过网页端部署'; exit 0 }
+          $gp = if ($env:GUAC_PASS) { $env:GUAC_PASS } else { $pass }
+
+          $t0 = Get-Date
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/guac/guac-schedule.ps1 `
+            -RdpUser $user -RdpPass $pass -GuacPass $gp `
+            -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
+            -ImageBundle $env:GUAC_IMAGE_BUNDLE
+          Write-Host ("调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
+      # ======================================================================
       # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 基线自检 -> 就绪校验 ->
       #   门户自检 -> 保活，单步骤持有 easytier-core，避免核心进程跨步骤被回收。
       # [v8] 移除出口节点/KCP 代理；新增出网基线自检、进程优先级、外部心跳。
