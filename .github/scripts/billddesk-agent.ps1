@@ -187,18 +187,31 @@ if (-not $found) {
 }
 L ('window=' + [BdWin]::Main + ' title=' + [BdWin]::MainTitle)
 [BdWin]::Focus()
-Start-Sleep -Milliseconds 1200
 
 # ---------- 2. 截图 + OCR 设备码 ----------
+# 冷启动竞态（2026-10-25 实测）：BillDesk 刚被拉起时 hwnd 和标题都对了，
+# 但 GetWindowRect 仍返回 0x0 —— Flutter 是「先建窗口壳、后定尺寸」。
+# 实测 22:26:42 找到窗口、22:26:44 量到的宽高还是 0，于是整轮直接判 bad-rect 退出，
+# 白跑一次开机。这里改成「轮询到 rect 有效为止」，最多等 12 秒。
 $shotPath = Join-Path $OutDir 'shot-home.png'
-$geo = Shot $shotPath
+$geo = $null
+$rectDeadline = (Get-Date).AddSeconds(12)
+$rectTries = 0
+while ((Get-Date) -lt $rectDeadline) {
+  $rectTries++
+  Start-Sleep -Milliseconds 800
+  $geo = Shot $shotPath
+  if ($geo) { break }
+  L ('rect not ready (try ' + $rectTries + ')')
+}
 if (-not $geo) {
   L 'BAD_WINDOW_RECT'
-  (@{ ok = $false; state = 'bad-rect'; session = $sess } | ConvertTo-Json) |
+  (@{ ok = $false; state = 'bad-rect'; error = 'window rect stayed empty for 12s'; session = $sess } | ConvertTo-Json) |
     Out-File (Join-Path $OutDir 'billddesk.json') -Encoding utf8
   L 'DONE'
   exit 2
 }
+L ('rect=' + $geo.W + 'x' + $geo.H + ' after ' + $rectTries + ' tries')
 L ("geo={0}x{1}+{2}+{3}" -f $geo.W, $geo.H, $geo.L, $geo.T)
 
 $lines = OcrImage $shotPath
