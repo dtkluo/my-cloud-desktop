@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     把云桌面上的 AgentDock 连接信息与「AI 助手连接提示词」同步到私有仓库，
     供手机端 workflow-controller 读取并一键复制。
@@ -26,7 +26,8 @@ param(
     [int]    $SessionHours = 6,
     [string] $GyLoginFile = 'C:\agentdock-install\gy-login.json',
     [switch] $OnlyIfChanged,
-    [string] $PiikStateFile = 'C:\piik-auto\piik.json'
+    [string] $PiikStateFile = 'C:\piik-auto\piik.json',
+    [string] $GuacStateFile = 'C:\guac-auto\guac.json'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -175,6 +176,37 @@ if ($PiikStateFile -and (Test-Path -LiteralPath $PiikStateFile)) {
     }
 }
 
+# ---------- 网页端 RDP（Guacamole）状态（由 guac-bootstrap.ps1 异步产出） ----------
+# 关键：该文件是「异步后到」的 —— 步骤 6 首次发布时通常还不存在（state=building），
+#       guac-bootstrap 装完会自己再调一次本脚本把 url 补上。手机端按 state 渲染即可。
+$guacState = 'off'; $guacUrl = ''; $guacHome = ''; $guacUser = ''; $guacPass = ''
+$guacTarget = ''; $guacMsg = ''
+if ($GuacStateFile -and (Test-Path -LiteralPath $GuacStateFile)) {
+    try {
+        $gq = Get-Content -LiteralPath $GuacStateFile -Raw | ConvertFrom-Json
+        $guacOk     = [bool]$gq.ok
+        $guacUrl    = [string]$gq.url
+        $guacHome   = [string]$gq.home
+        $guacUser   = [string]$gq.username
+        $guacPass   = [string]$gq.password
+        $guacTarget = [string]$gq.rdp_target
+        if ($guacOk -and $guacUrl) {
+            $guacState = 'ready'
+            $guacMsg   = '网页端 RDP 已就绪（浏览器直连，无需 EasyTier）'
+        } else {
+            $guacState = 'failed'
+            $guacMsg   = '网页端 RDP 部署未完成（local_http=' + [string]$gq.local_http + '）'
+        }
+    } catch {
+        $guacState = 'failed'
+        $guacMsg   = '网页端状态文件解析失败：' + $_.Exception.Message
+    }
+} elseif (Test-Path -LiteralPath 'C:\guac-auto') {
+    # 目录已存在但结果文件还没写 => 后台 bootstrap 正在跑
+    $guacState = 'building'
+    $guacMsg   = '网页端 RDP 后台部署中（首次约 5-8 分钟，不影响到当前控制）'
+}
+
 $payload = [ordered]@{
     schema     = 1
     updated_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -223,6 +255,15 @@ $payload = [ordered]@{
         remote_control = $piikRemote
         message        = $piikMsg
     }
+    guac = [ordered]@{
+        state      = $guacState
+        url        = $guacUrl
+        home       = $guacHome
+        username   = $guacUser
+        password   = $guacPass
+        rdp_target = $guacTarget
+        message    = $guacMsg
+    }
     prompt     = $prompt
 }
 
@@ -263,7 +304,11 @@ if ($OnlyIfChanged -and $null -ne $remoteJson) {
                  # Piik 链接随每次开机变化（trycloudflare 临时域名），必须参与比较
                  ($remoteJson.piik.url -eq $piikUrl) -and
                  ($remoteJson.piik.state -eq $piikState) -and
-                 ($remoteJson.piik.remote_control -eq $piikRemote)
+                 ($remoteJson.piik.remote_control -eq $piikRemote) -and
+                 # guac 是从 building -> ready 异步跃迁的，必须参与比较，
+                 # 否则 bootstrap 装完那次补推会被「其余字段未变」吞掉。
+                 ($remoteJson.guac.state -eq $guacState) -and
+                 ($remoteJson.guac.url -eq $guacUrl)
     if ($unchanged) {
         Write-Host '连接信息未发生变化，跳过提交。'
         exit 0
