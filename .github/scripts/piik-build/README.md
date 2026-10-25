@@ -1,7 +1,8 @@
 # Piik 补丁构建（远控稳定性）
 
-云桌面上的 Piik 不是官方原版，而是**上游 v2.4.1 源码 + 两处本地修复**编译出来的
-`piik-app.exe`。产物发布在 Release `piik-runtime-v2`，`start-piik-host.ps1` 从这里下载。
+云桌面上的 Piik 不是官方原版，而是**上游 v2.4.1 源码 + 本地修复**编译出来的
+`piik-app.exe`。产物发布在 Release `piik-runtime-v3`，`start-piik-host.ps1` 从这里下载
+（v1 / v2 保留可回滚）。
 
 ## 为什么要改
 
@@ -78,3 +79,26 @@ pwsh -File C:\piikbuild\start-piik-host.ps1
   本次只解决「抖动就掉权 / 掉了必须刷新」。
 - 上游若日后再改 `RevokeEdge`（建议关注 `TNTcraftHIM/Piik` 的 release notes），
   可以丢掉本 overlay 直接跟进，届时先 diff 这三个文件确认。
+
+## v3（2026-10-25）：掉权的真正根因 + 触屏输入
+
+第一轮只处理了 ICE 抖动撤权，用户仍反馈「用着用着掉权、鼠标键盘都不好用、没有右键、
+键盘唤不出手机输入法」。重新读前端代码后找到第三条、也是最主要的一条：
+
+**`input-session.ts` 的 `send()` 在 `bufferedAmount > 8192` 时 `channel.close()`。**
+手机滑动时指针采样是 4ms 一次（250Hz）、每条 JSON 约 90 字节 ⇒ 队列积压 0.3 秒就撞阈值。
+而 Data Channel 一旦关闭**本页无法重建**，UI 整体 `return null`，只能刷新邀请链接 —— 与症状完全吻合。
+v2.4.1 的 4ms 节流反而让这条更容易触发。
+
+| 文件 | 改动 |
+|---|---|
+| `src/client/remote-control/input-session.ts` | 队列超限只丢指针样本、**永不关通道**；指针节流 4ms→32ms（约 30Hz）；软限制 16KB 只丢 move，硬限制 160KB 全丢 |
+| `src/client/remote-control/touchpad.ts` | 长按 500ms 后**不移动就抬手 = 右键单击**，长按后移动仍是拖动；新增 `click()` / `doubleClick()` |
+| `src/client/components/living/RemoteControl.tsx` | 触屏时画面下方浮出「右键 / 中键 / 双击」按钮；键盘首开直达文本页 |
+| `src/client/components/living/RemoteKeyboard.tsx` | 新增 `initialPage`，文本框 `autoFocus` 在点击手势内聚焦 ⇒ 手机输入法弹出；面板不再抢焦点 |
+| `src/client/components/living/remote-control.css` | 触屏按钮条样式 |
+| `tests/remote-input.test.ts` | 对齐 32ms 节流窗口 |
+
+验证：`npx tsc -b`、`npm run build:web`、`npx vitest run`（1760 通过；4 条 archive/release-automation
+用例依赖 git 历史与 Unix 权限，在 tar 解压目录里本来就失败）。上线后在公网链接上抓
+`ViewerPage-*.js` 分包，确认含 `lr-remote-touch-actions` 与中文「右键/中键/双击」。
