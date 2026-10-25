@@ -734,6 +734,12 @@ jobs:
               Write-Host "  BilldDesk -> code=$($bds.device_code) pwd=$($bds.password) state=$($bds.state) audio=$($bds.audio)"
             } catch { Write-Host "  billddesk.json parse failed" }
           }
+          # 把设备码/密码同步到手机端状态文件（billddesk 节点，piik 节点标记退役）
+          try {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/billddesk-state.ps1 `
+              -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH
+            Write-Host "billddesk-state.ps1 exit=$LASTEXITCODE"
+          } catch { Write-Host "billddesk-state failed: $_" }
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
