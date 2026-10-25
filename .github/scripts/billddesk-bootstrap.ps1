@@ -198,5 +198,24 @@ $out = [ordered]@{
 }
 Write-State $out
 L ('RESULT ok=' + $out.ok + ' state=' + $out.state + ' code=' + $out.device_code + ' pwd=' + $out.password)
+
+# ---------------- 7. 同步到手机端状态文件 ----------------
+# 放在这里而不是 workflow 里，是为了让 workflow 的 run 块只保留一行调用：
+# GitHub 对整段 run 脚本有 21000 个 UTF-8 字节的硬上限，超了 dispatch 直接 422。
+$stateScript = Join-Path $PSScriptRoot 'billddesk-state.ps1'
+if (Test-Path $stateScript) {
+  if ([string]::IsNullOrWhiteSpace($env:STATE_TOKEN)) {
+    L 'WARN: STATE_TOKEN empty, skip state sync'
+  } else {
+    L 'syncing state...'
+    try {
+      & $stateScript -ResultFile $jsonPath 2>&1 | ForEach-Object { L ('  state| ' + $_) }
+      L ('billddesk-state exit=' + $LASTEXITCODE)
+    } catch { L ('state sync failed: ' + $_.Exception.Message) }
+  }
+} else {
+  L ('WARN: billddesk-state.ps1 not found at ' + $stateScript)
+}
+
 L 'DONE'
 exit 0
