@@ -21,6 +21,13 @@ $root = Split-Path -Parent $PSScriptRoot        # 仓库根目录
 $scriptDir = $PSScriptRoot
 Write-Host "[piik-bootstrap] script dir: $scriptDir"
 
+# 端口护栏：Piik 的 Local 站点绝不能占用 AgentDock 的端口，否则 Piik 的动态页面请求
+# 会打到 AgentDock 的 HTTP 服务上，表现为 host ui not ready、房间建不出来。
+if ($Port -eq $AgentDockPort) {
+  Write-Warning "[piik-bootstrap] -Port $Port collides with AgentDock port, forcing 8787"
+  $Port = 8787
+}
+
 # ---------- 1. 虚拟声卡 ----------
 try {
   $audio = Join-Path $scriptDir 'install-virtual-audio.ps1'
