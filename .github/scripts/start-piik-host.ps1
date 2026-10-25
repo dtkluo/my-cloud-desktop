@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 $work = 'C:\piik-auto'
 $result = [ordered]@{
   ok = $false; state = 'starting'; url = ''; site = ''; room_code = ''; password = $RoomPassword
-  resolution = ''; fps = 0; audio = $false; remote_control = $false; elapsed_sec = 0; error = ''
+  resolution = ''; fps = 0; audio = $false; remote_control = $false; remote_mode = ''; elapsed_sec = 0; error = ''
 }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
@@ -159,6 +159,7 @@ Start-Process -FilePath '$chrome' -ArgumentList '--headless=new','--remote-debug
   $result.fps = [int]$r.fps
   $result.audio = [bool]$r.audio
   $result.remote_control = [bool]$r.remoteControl
+  $result.remote_mode = [string]$r.remoteMode
   $result.elapsed_sec = [int]$r.elapsedSec
   if (-not $r.ok) {
     $errs = ($r.errors -join '; ')
