@@ -720,26 +720,12 @@ jobs:
           Write-Host "=========================================="
 
           # ---------- E1.5 + E2. virtual audio + BilldDesk remote control ----------
-          # 取代原 Piik 方案：BilldDesk 走原生 WebRTC(UDP/ICE)，媒体不再经 HTTP 隧道，
-          # 延迟与音画同步明显优于 Piik。脚本内部顺序：先装虚拟声卡 -> 再静默安装
-          # BilldDesk -> 起 BilldDeskService -> 用 runneradmin 交互任务进 session 2
-          # 截图 OCR 出设备码并点开密码 -> 落 C:\billddesk-auto\billddesk.json。
-          Write-Host ""
-          Write-Host "===== E1.5 + E2. 虚拟声卡 + BilldDesk 远程控制（runneradmin 会话）====="
+          # BilldDesk replaces Piik (native WebRTC/UDP, media no longer via HTTP tunnel).
+          # All steps live in billddesk-bootstrap.ps1, which keeps this run block short:
+          # GitHub caps the whole run script at 21000 UTF-8 bytes and returns 422 above it.
+          Write-Host "===== E1.5 + E2. BilldDesk remote control (runneradmin session) ====="
           & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/billddesk-bootstrap.ps1
           Write-Host "billddesk-bootstrap.ps1 exit=$LASTEXITCODE"
-          if (Test-Path 'C:\billddesk-auto\billddesk.json') {
-            try {
-              $bds = Get-Content 'C:\billddesk-auto\billddesk.json' -Raw | ConvertFrom-Json
-              Write-Host "  BilldDesk -> code=$($bds.device_code) pwd=$($bds.password) state=$($bds.state) audio=$($bds.audio)"
-            } catch { Write-Host "  billddesk.json parse failed" }
-          }
-          # 把设备码/密码同步到手机端状态文件（billddesk 节点，piik 节点标记退役）
-          try {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/billddesk-state.ps1 `
-              -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH
-            Write-Host "billddesk-state.ps1 exit=$LASTEXITCODE"
-          } catch { Write-Host "billddesk-state failed: $_" }
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
