@@ -98,6 +98,11 @@ class CDP {
 
 const CLICK = (aria) => `(function(){var el=[].slice.call(document.querySelectorAll('[aria-label]')).filter(function(e){return e.getAttribute('aria-label')===${JSON.stringify(aria)};})[0];if(!el)return 'MISS';el.click();return 'OK';})()`;
 const CLICKP = (pre) => `(function(){var el=[].slice.call(document.querySelectorAll('[aria-label]')).filter(function(e){return (e.getAttribute('aria-label')||'').indexOf(${JSON.stringify(pre)})===0;})[0];if(!el)return 'MISS';el.click();return 'OK';})()`;
+// Try several aria-label candidates in order; the host UI is localized.
+const CLICK_ANY = (list) => `(function(){var L=${JSON.stringify(list)};for(var i=0;i<L.length;i++){var el=[].slice.call(document.querySelectorAll('[aria-label]')).filter(function(e){return e.getAttribute('aria-label')===L[i];})[0];if(el&&!el.disabled){el.click();return 'OK:'+L[i];}}return 'MISS';})()`;
+const HAS_ANY = (list) => `(function(){var L=${JSON.stringify(list)};for(var i=0;i<L.length;i++){if([].slice.call(document.querySelectorAll('[aria-label]')).filter(function(e){return e.getAttribute('aria-label')===L[i];}).length)return true;}return false;})()`;
+const SWITCH_ANY = (list) => `(function(){var L=${JSON.stringify(list)};for(var i=0;i<L.length;i++){var s=[].slice.call(document.querySelectorAll('[role=switch]')).filter(function(e){return (e.getAttribute('aria-label')||'').indexOf(L[i])>=0;})[0];if(s){if(s.getAttribute('aria-checked')==='true')return 'ALREADY';s.click();return 'ON';}}return 'MISS';})()`;
+const SWITCH_STATE_ANY = (list) => `(function(){var L=${JSON.stringify(list)};for(var i=0;i<L.length;i++){var s=[].slice.call(document.querySelectorAll('[role=switch]')).filter(function(e){return (e.getAttribute('aria-label')||'').indexOf(L[i])>=0;})[0];if(s)return s.getAttribute('aria-checked');}return 'NA';})()`;
 const TEXT = `(document.body.innerText||'').replace(/\\s+/g,' ')`;
 const HAS = (s) => `(${TEXT}).indexOf(${JSON.stringify(s)})>=0`;
 const HAS_EL = (aria) => `!![].slice.call(document.querySelectorAll('[aria-label]')).filter(function(e){return e.getAttribute('aria-label')===${JSON.stringify(aria)};})[0]`;
@@ -108,6 +113,17 @@ const HOOK = `
 (function(){
   if(window.__piikAuto) return;
   window.__piikAuto = { rooms: [] };
+  // Seed the persisted remote-control mode BEFORE the host UI mounts. A fresh
+  // Chrome profile has empty localStorage, so the form draft would default to
+  // "ask" and switching remote control on would immediately apply "ask" --
+  // leaving every Viewer stuck on "waiting for host approval".
+  try {
+    var K = 'piik:room-preferences:v1';
+    var raw = window.localStorage.getItem(K);
+    var obj = raw ? JSON.parse(raw) : {};
+    obj.remoteControlMode = 'room';
+    window.localStorage.setItem(K, JSON.stringify(obj));
+  } catch (e) {}
   var orig = window.fetch;
   window.fetch = function(input, init){
     try {
@@ -220,20 +236,33 @@ try {
   R.audioSwitch = sw;
   R.audio = !(await cdp.eval(HAS('Source sound is not being shared')));
 
-  // 5. remote control, authorized for room viewers
-  await step('open-remote', () => cdp.eval(CLICK('Remote control')));
+  // 5. remote control, authorized for ROOM VIEWERS (not the default ask mode).
+  //    Policy modes live in internal/app/remoteinput/policy.go: off | ask | room | password.
+  //    - "ask" (default): every Viewer request is parked as pending until the host
+  //      clicks Allow -- i.e. the "waiting for host" prompt.
+  //    - "room": Manager.receive() takes the non-ask branch, authorize("") passes and
+  //      canJoin() succeeds, so the grant is issued automatically. This is what we want.
+  //    Picking the segment only edits a local form draft; the applied policy changes
+  //    solely when the commit button is pressed. Skipping it silently left "ask" active.
+  await step('open-remote', () => cdp.eval(CLICK_ANY(['Remote control', '远程控制'])));
   await sleep(2500);
-  await step('remote-switch', () => cdp.eval(SWITCH_ON('Remote control')));
+  await step('remote-switch', () => cdp.eval(SWITCH_ANY(['Remote control', '远程控制'])));
   await sleep(2500);
-  await step('remote-mode', () => cdp.eval(CLICK('Room Viewers')));
-  await sleep(2500);
-  R.remoteControl = (await cdp.eval(SWITCH_STATE('Remote control')).catch(() => 'NA')) === 'true';
-  R.remoteMode = (await cdp.eval(`(function(){var b=[].slice.call(document.querySelectorAll('[aria-label="Room Viewers"]'))[0];return b? (b.getAttribute('aria-pressed')||'') : 'NA';})()`)) || '';
+  await step('remote-mode-room', () => cdp.eval(CLICK_ANY(['Room Viewers', '房间观众'])));
+  await sleep(1500);
+  // Commit button: "Allow Viewers" while control is still off, "Apply" once it is on.
+  await step('remote-commit', () => cdp.eval(CLICK_ANY(['Allow Viewers', '允许观众控制', 'Apply', '应用'])));
+  await sleep(3500);
+  R.remoteControl = (await cdp.eval(SWITCH_STATE_ANY(['Remote control', '远程控制'])).catch(() => 'NA')) === 'true';
+  // The commit row is rendered only while draft !== applied mode. Its disappearance is
+  // the only DOM-level proof that "room" was actually applied rather than just drafted.
+  R.remoteApplied = !(await cdp.eval(HAS_ANY(['Allow Viewers', '允许观众控制', 'Apply', '应用'])));
+  R.remoteMode = R.remoteApplied ? 'room' : (await cdp.eval(`(function(){var b=[].slice.call(document.querySelectorAll('[aria-label="Room Viewers"],[aria-label="房间观众"]'))[0];return b? (b.getAttribute('aria-pressed')||'') : 'NA';})()`)) || '';
 
   if (R.inviteUrl) {
     try { R.site = new URL(R.inviteUrl).origin; } catch (e) {}
   }
-  R.ok = !!(R.sharing && R.inviteUrl && R.remoteControl);
+  R.ok = !!(R.sharing && R.inviteUrl && R.remoteControl && R.remoteApplied);
   cdp.close();
 } catch (e) {
   R.errors.push('fatal: ' + String(e).slice(0, 240));
@@ -244,5 +273,5 @@ try {
   fs.mkdirSync(CFG.out.replace(/[\\/][^\\/]+$/, ''), { recursive: true });
 } catch (e) {}
 fs.writeFileSync(CFG.out, JSON.stringify(R, null, 1), 'utf8');
-console.log(JSON.stringify({ ok: R.ok, roomId: R.roomId, sharing: R.sharing, remote: R.remoteControl, audio: R.audio, el: R.elapsedSec }));
+console.log(JSON.stringify({ ok: R.ok, roomId: R.roomId, sharing: R.sharing, remote: R.remoteControl, remoteMode: R.remoteMode, audio: R.audio, el: R.elapsedSec }));
 process.exit(R.ok ? 0 : 1);
