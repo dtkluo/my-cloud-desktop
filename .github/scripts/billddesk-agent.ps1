@@ -279,11 +279,12 @@ L ("devCode=" + $devCode + " devY=" + $devY)
 # ---------- 3. 像素定位眼睛图标并点击 ----------
 $password = ''
 if ($devCode -and $devY -ge 0) {
-  # 密码行相对设备码行的偏移（600 基准下约 +86px）
+  # 密码行图标相对设备码行的偏移：600 基准下眼睛图标在 devY+95 ~ +116
+  # （2026-10-26 实测 devY=192、图标 y[287,308] 中心 297；旧版扫描带 ±12
+  #  只罩住图标上沿、点击 y 又固定取带中心 278，偏 19px 点到空白，密码永远出不来）
   $scale = $geo.H / 600.0
-  $pwdY = $devY + (86.0 * $scale)
-  $y0 = [int]([Math]::Max(0, $pwdY - 12 * $scale))
-  $y1 = [int]([Math]::Min($geo.H - 1, $pwdY + 12 * $scale))
+  $y0 = [int]([Math]::Max(0, $devY + (55.0 * $scale)))
+  $y1 = [int]([Math]::Min($geo.H - 1, $devY + (125.0 * $scale)))
   $x0 = [int]($geo.W * 0.75)
   $x1 = [int]($geo.W * 0.99)
   L ("scan eye region x[$x0,$x1) y[$y0,$y1)")
@@ -294,12 +295,14 @@ if ($devCode -and $devY -ge 0) {
   $g.Dispose()
 
   $cols = @{}
+  $rowsY = @{}
   for ($y = $y0; $y -le $y1; $y++) {
     for ($x = $x0; $x -le $x1; $x++) {
       $c = $bmp.GetPixel($x, $y)
       $lum = 0.299 * $c.R + 0.587 * $c.G + 0.114 * $c.B
       if ($lum -lt 170) {
         if ($cols.ContainsKey($x)) { $cols[$x] = $cols[$x] + 1 } else { $cols[$x] = 1 }
+        if ($rowsY.ContainsKey($x)) { $rowsY[$x] = @($rowsY[$x]) + $y } else { $rowsY[$x] = @($y) }
       }
     }
   }
@@ -318,10 +321,21 @@ if ($devCode -and $devY -ge 0) {
 
     $eye = $clusters[0]   # 最左簇 = 眼睛
     $ex = $geo.L + [int](($eye[0] + $eye[-1]) / 2)
-    $ey = $geo.T + [int](($y0 + $y1) / 2)
+    # 点击 y 用眼睛簇实际暗像素的 y 中心，而不是扫描带中心
+    $eyeYs = @()
+    foreach ($cx0 in $eye) {
+      if ($rowsY.ContainsKey($cx0)) { $eyeYs += $rowsY[$cx0] }
+    }
+    if ($eyeYs.Count -gt 0) {
+      $minY = ($eyeYs | Measure-Object -Minimum).Minimum
+      $maxY = ($eyeYs | Measure-Object -Maximum).Maximum
+      $ey = $geo.T + [int](($minY + $maxY) / 2)
+    } else {
+      $ey = $geo.T + [int](($y0 + $y1) / 2)
+    }
     L ("click eye at $ex,$ey")
     [BdWin]::Click($ex, $ey)
-    Start-Sleep -Milliseconds 1600
+    Start-Sleep -Milliseconds 2000
 
     $pwdShot = Join-Path $OutDir 'shot-pwd.png'
     [void](Shot $pwdShot)
