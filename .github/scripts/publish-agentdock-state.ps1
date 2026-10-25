@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     把云桌面上的 AgentDock 连接信息与「AI 助手连接提示词」同步到私有仓库，
     供手机端 workflow-controller 读取并一键复制。
@@ -27,7 +27,8 @@ param(
     [string] $GyLoginFile = 'C:\agentdock-install\gy-login.json',
     [switch] $OnlyIfChanged,
     [string] $PiikStateFile = 'C:\piik-auto\piik.json',
-    [string] $GuacStateFile = 'C:\guac-auto\guac.json'
+    [string] $GuacStateFile = 'C:\guac-auto\guac.json',
+    [string] $BillddeskStateFile = 'C:\billddesk-auto\billddesk.json'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -207,6 +208,53 @@ if ($GuacStateFile -and (Test-Path -LiteralPath $GuacStateFile)) {
     $guacMsg   = '网页端 RDP 后台部署中（首次约 5-8 分钟，不影响到当前控制）'
 }
 
+# ---------- BilldDesk 远程控制状态（由 billddesk-bootstrap.ps1 产出，已取代 Piik） ----------
+# 与 Piik 不同：入口不是链接而是「设备码 + 连接密码」，且每次开机重装都会变，
+# 所以它必须随保活轮询持续刷新，不能在步骤末尾写一次就算完 —— 本脚本是全量重建 JSON，
+# 早先把 billddesk 节点漏在这里，导致状态文件里刚写进去几秒就被覆盖掉。
+$bdState = 'pending'; $bdCode = ''; $bdUuid = ''; $bdPass = ''
+$bdWindow = ''; $bdSession = 0; $bdAudio = $false; $bdMsg = ''
+if ($BillddeskStateFile -and (Test-Path -LiteralPath $BillddeskStateFile)) {
+    try {
+        $bd        = Get-Content -LiteralPath $BillddeskStateFile -Raw | ConvertFrom-Json
+        $bdCode    = [string]$bd.device_code
+        $bdUuid    = [string]$bd.device_uuid
+        $bdPass    = [string]$bd.password
+        $bdWindow  = [string]$bd.window
+        $bdSession = [int]$bd.session
+        $bdAudio   = [bool]$bd.audio
+        if ($bd.ok -and $bdCode -and $bdPass) {
+            $bdState = 'ready'
+            $bdMsg   = 'BilldDesk 已就绪（设备码 ' + $bdCode + '，runneradmin 会话，原生 WebRTC UDP）'
+        } elseif ($bdCode) {
+            $bdState = 'degraded'
+            $bdMsg   = 'BilldDesk 已启动但密码未取到（' + [string]$bd.state + '），可查看界面'
+        } else {
+            $bdState = 'failed'
+            $bdMsg   = 'BilldDesk 启动失败：' + [string]$bd.error
+        }
+    } catch {
+        $bdState = 'failed'
+        $bdMsg   = 'BilldDesk 状态文件解析失败：' + $_.Exception.Message
+    }
+} elseif (Test-Path -LiteralPath 'C:\billddesk-auto') {
+    $bdMsg = 'BilldDesk 正在安装并读取设备码（每次开机重装，设备码会变）'
+} else {
+    $bdState = 'off'
+    $bdMsg   = 'BilldDesk 未安装'
+}
+
+# Piik 已退役：只要 BilldDesk 在跑，就把 piik 段统一写成 retired，
+# 避免手机端读到 piik-auto 的残留状态而显示「分享中」。
+$piikStateOut = $piikState
+$piikUrlOut   = $piikUrl
+$piikMsgOut   = $piikMsg
+if ($bdState -ne 'off') {
+    $piikStateOut = 'retired'
+    $piikUrlOut   = ''
+    $piikMsgOut   = '已由 BilldDesk 取代'
+}
+
 $payload = [ordered]@{
     schema     = 1
     updated_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -244,8 +292,8 @@ $payload = [ordered]@{
         message    = $gyMessage
     }
     piik = [ordered]@{
-        state          = $piikState
-        url            = $piikUrl
+        state          = $piikStateOut
+        url            = $piikUrlOut
         site           = $piikSite
         room_code      = $piikRoom
         password       = $piikPass
@@ -253,7 +301,18 @@ $payload = [ordered]@{
         fps            = $piikFps
         audio          = $piikAudio
         remote_control = $piikRemote
-        message        = $piikMsg
+        message        = $piikMsgOut
+    }
+    billddesk = [ordered]@{
+        state       = $bdState
+        device_code = $bdCode
+        device_uuid = $bdUuid
+        password    = $bdPass
+        kind        = 'webrtc-native'
+        window      = $bdWindow
+        session     = $bdSession
+        audio       = $bdAudio
+        message     = $bdMsg
     }
     guac = [ordered]@{
         state      = $guacState
@@ -302,9 +361,14 @@ if ($OnlyIfChanged -and $null -ne $remoteJson) {
                  ($remoteJson.guangya_login.user_code -eq $gyUserCode) -and
                  ($remoteJson.guangya_login.device_id -eq $gyDeviceId) -and
                  # Piik 链接随每次开机变化（trycloudflare 临时域名），必须参与比较
-                 ($remoteJson.piik.url -eq $piikUrl) -and
-                 ($remoteJson.piik.state -eq $piikState) -and
+                 ($remoteJson.piik.url -eq $piikUrlOut) -and
+                 ($remoteJson.piik.state -eq $piikStateOut) -and
                  ($remoteJson.piik.remote_control -eq $piikRemote) -and
+                 # BilldDesk 设备码/密码每次开机重装都会变，必须参与比较，
+                 # 否则保活轮询会因「其余字段未变」把新凭据跳过，手机端永远读不到。
+                 ($remoteJson.billddesk.state -eq $bdState) -and
+                 ($remoteJson.billddesk.device_code -eq $bdCode) -and
+                 ($remoteJson.billddesk.password -eq $bdPass) -and
                  # guac 是从 building -> ready 异步跃迁的，必须参与比较，
                  # 否则 bootstrap 装完那次补推会被「其余字段未变」吞掉。
                  ($remoteJson.guac.state -eq $guacState) -and
