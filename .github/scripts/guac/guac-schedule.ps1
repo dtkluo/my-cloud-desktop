@@ -51,6 +51,12 @@ $sb = New-Object System.Text.StringBuilder
 if ($StateRepo) { [void]$sb.AppendLine("`$env:AGENTDOCK_STATUS_REPO = $(& $q $StateRepo)") }
 if ($StatePath) { [void]$sb.AppendLine("`$env:AGENTDOCK_STATUS_PATH = $(& $q $StatePath)") }
 if ($env:STATE_TOKEN) { [void]$sb.AppendLine("`$env:STATE_TOKEN = $(& $q $env:STATE_TOKEN)") }
+# publish-agentdock-state.ps1 用 $env:ET_VIRTUAL_IP / $env:ET_SOCKS5_PORT 填 cloud_desktop 段。
+# 计划任务拿到的是全新环境，不会继承 workflow 的 env ⇒ 不显式传递就会把这两项写成空，
+# 手机上 easytier 地址与 SOCKS5 会短暂消失（2026-10-25 实测：guac 自推那一次丢了 IP，
+# 直到 41 秒后另一次推送才补回来）。
+if ($env:ET_VIRTUAL_IP)  { [void]$sb.AppendLine("`$env:ET_VIRTUAL_IP = $(& $q $env:ET_VIRTUAL_IP)") }
+if ($env:ET_SOCKS5_PORT) { [void]$sb.AppendLine("`$env:ET_SOCKS5_PORT = $(& $q $env:ET_SOCKS5_PORT)") }
 [void]$sb.AppendLine("& $(& $q $bootstrap) -RdpUser $(& $q $RdpUser) -RdpPass $(& $q $RdpPass) -GuacPass $(& $q $GuacPass)$(if ($ImageBundle) { ' -ImageBundle ' + (& $q $ImageBundle) }) *> $(& $q (Join-Path $WorkDir 'run.log'))")
 [void]$sb.AppendLine('exit $LASTEXITCODE')
 
