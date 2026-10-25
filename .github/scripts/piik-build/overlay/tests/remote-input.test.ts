@@ -180,7 +180,9 @@ it("reuses the authenticated identity across media routes and syncs after delaye
   const newPacket = next.sent.find(p => p.data)!;
   expect(registered).toHaveLength(1);
   expect(newPacket.id).toBe(oldPacket.id);
-  expect(newPacket.epoch).not.toBe(oldPacket.epoch);
+  // 同一条身份信道重建后必须沿用同一个 epoch：Host 收到不同 epoch 的包就会
+  // 撤销授权，这正是「ICE 重新协商一次就掉控制权」的原因。
+  expect(newPacket.epoch).toBe(oldPacket.epoch);
   const sequence = (p: Record<string, unknown>) => new DataView(Uint8Array.from(atob(p.data as string), c => c.charCodeAt(0)).buffer).getBigUint64(0);
   expect(sequence(newPacket)).toBeGreaterThan(sequence(oldPacket));
   nextSession.dispose();
@@ -424,4 +426,33 @@ it("keeps queued motion and wheel precision across updates to the same active gr
     session.dispose();
     vi.useRealTimers();
   }
+});
+
+it("keeps the upstream channel alive when the input queue backs up", async () => {
+  const registered: InputIdentity[] = [];
+  const route = new InputRoute(() => {});
+  route.enable(identity => { registered.push(identity); return true; });
+  const up = new Channel();
+  route.setUpstream(up as unknown as RTCDataChannel);
+  up.receive({ ready: true });
+  up.receive({ id: registered[0].endpointId, ready: true });
+  const endpoint = route.current!;
+  await vi.waitFor(() => expect(up.readyState).toBe("open"));
+
+  // 手机滑屏时指针样本会把上游队列顶起来。旧实现这里会 close()，而关闭上游
+  // 等于把整个输入端点退役，本页无法重建 ⇒ 只能刷新邀请链接才能恢复。
+  up.bufferedAmount = 1024 * 1024;
+  const backlog = up.sent.filter(p => p.data).length;
+  endpoint.send(JSON.stringify({ type: "move", x: 0.5, y: 0.5 }));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(up.sent.filter(p => p.data).length).toBe(backlog);
+  expect(up.readyState).toBe("open");
+  expect(endpoint.readyState).toBe("open");
+
+  // 队列排空后同一个端点立刻继续发，不需要重建、也不会丢授权。
+  up.bufferedAmount = 0;
+  endpoint.send(JSON.stringify({ type: "move", x: 0.25, y: 0.75 }));
+  await vi.waitFor(() => expect(up.sent.filter(p => p.data).length).toBe(backlog + 1));
+  expect(endpoint.readyState).toBe("open");
+  route.dispose();
 });
