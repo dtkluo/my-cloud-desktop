@@ -39,6 +39,45 @@ function Write-State($obj) {
   ($obj | ConvertTo-Json -Depth 4) | Out-File $jsonPath -Encoding utf8
 }
 
+# ---------------- 进度心跳 ----------------
+# 为什么需要它：这一步跑在 workflow 的保活步骤内部，job 要等 6 小时会话结束才会
+# 产生可下载日志（GitHub 对 in-progress job 的 logs 接口直接 404），一旦某个子步骤
+# 卡住，外部**完全看不见**卡在哪 —— 2026-10-25 就因此白等了半小时。
+# 所以把当前 stage 直接写进状态文件的 billddesk_progress 字段，手机端/排障脚本可读。
+# 失败一律吞掉：心跳绝不能拖慢或中断主流程。
+function Beat($stage) {
+  L ('BEAT ' + $stage)
+  if ([string]::IsNullOrWhiteSpace($env:STATE_TOKEN)) { return }
+  try {
+    $api = 'https://api.github.com/repos/dtkluo/agentdock-v2/contents/runtime/cloud-desktop.json'
+    $hd  = @{
+      Authorization = 'Bearer ' + $env:STATE_TOKEN
+      'User-Agent'  = 'billddesk-beat'
+      Accept        = 'application/vnd.github+json'
+    }
+    $r = Invoke-RestMethod -Uri $api -Headers $hd -Method Get -TimeoutSec 20
+    $j = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($r.content -replace '\s', ''))) | ConvertFrom-Json
+    $prog = [ordered]@{
+      stage = $stage
+      at    = (Get-Date).ToUniversalTime().ToString('o')
+      pid   = $PID
+    }
+    $j | Add-Member -NotePropertyName billddesk_progress -NotePropertyValue $prog -Force
+    $j.updated_at = (Get-Date).ToUniversalTime().ToString('o')
+    $body = @{
+      message = 'billdesk progress: ' + $stage
+      content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($j | ConvertTo-Json -Depth 12)))
+      sha     = $r.sha
+      branch  = 'main'
+    } | ConvertTo-Json -Depth 6
+    Invoke-RestMethod -Uri $api -Headers $hd -Method Put -Body $body -ContentType 'application/json; charset=utf-8' -TimeoutSec 30 | Out-Null
+  } catch {
+    L ('beat failed: ' + $_.Exception.Message)
+  }
+}
+
+Beat 'start'
+
 # ---------------- -1. 停用 Piik 残留（幂等） ----------------
 # BilldDesk 已取代 Piik。若是同一台机器重跑（Piik 装过），这里先把它停干净，
 # 避免两套远控同时抢声卡/带宽。全新机器上此步会直接返回 retired=True (never installed)。
@@ -64,6 +103,7 @@ if (Test-Path $audioScript) {
 } else {
   L ('WARN: install-virtual-audio.ps1 not found at ' + $audioScript)
 }
+Beat 'audio-done'
 
 # ---------------- 1. 安装 ----------------
 if (Test-Path $appExe) {
@@ -71,18 +111,21 @@ if (Test-Path $appExe) {
 } else {
   $pkg = Join-Path $WorkDir 'BilldDesk-setup.exe'
   if (-not (Test-Path $pkg) -or (Get-Item $pkg).Length -lt 10MB) {
+    Beat 'download-start'
     L ('downloading ' + $InstallerUrl)
     $ok = $false
     for ($try = 1; $try -le 3; $try++) {
       try {
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $InstallerUrl -OutFile $pkg -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+        # 单次 120s：原先 300s × 3 会让下载卡住时白耗 15 分钟，且外部完全看不到
+        Invoke-WebRequest -Uri $InstallerUrl -OutFile $pkg -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
         if ((Get-Item $pkg).Length -gt 10MB) { $ok = $true; break }
       } catch {
         L ("  download try$try failed: " + $_.Exception.Message)
         Start-Sleep -Seconds 3
       }
     }
+    Beat 'download-done'
     if (-not $ok) {
       Write-State ([ordered]@{ ok = $false; state = 'download-failed'; error = 'installer download failed'; updated_at = (Get-Date).ToUniversalTime().ToString('o') })
       L 'FATAL download failed'
@@ -108,6 +151,7 @@ if (Test-Path $appExe) {
 }
 
 # ---------------- 2. 服务 ----------------
+Beat 'install-done'
 $svc = Get-Service -Name 'BilldDeskService' -ErrorAction SilentlyContinue
 if (-not $svc) {
   L 'WARN: BilldDeskService missing'
@@ -121,6 +165,7 @@ if (-not $svc) {
 }
 
 # ---------------- 3. 部署 agent 到本地 ----------------
+Beat 'service-done'
 $agentSrc = Join-Path $PSScriptRoot 'billddesk-agent.ps1'
 $agentDst = Join-Path $WorkDir 'billddesk-agent.ps1'
 if (Test-Path $agentSrc) {
@@ -152,10 +197,12 @@ $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGo
                -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 L ('task registered: ' + $taskName + ' user=' + $AgentUser)
+Beat 'task-registered'
 Start-ScheduledTask -TaskName $taskName
 L 'task started'
 
 # ---------------- 5. 等结果 ----------------
+Beat 'task-started'
 $deadline = (Get-Date).AddSeconds($AgentTimeoutSec)
 $got = $null
 while ((Get-Date) -lt $deadline) {
@@ -198,6 +245,7 @@ $out = [ordered]@{
 }
 Write-State $out
 L ('RESULT ok=' + $out.ok + ' state=' + $out.state + ' code=' + $out.device_code + ' pwd=' + $out.password)
+Beat 'result-ready'
 
 # ---------------- 7. 同步到手机端状态文件 ----------------
 # 放在这里而不是 workflow 里，是为了让 workflow 的 run 块只保留一行调用：
