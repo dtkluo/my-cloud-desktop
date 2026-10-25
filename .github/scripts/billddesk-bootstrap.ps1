@@ -39,6 +39,19 @@ function Write-State($obj) {
   ($obj | ConvertTo-Json -Depth 4) | Out-File $jsonPath -Encoding utf8
 }
 
+# ---------------- -1. 停用 Piik 残留（幂等） ----------------
+# BilldDesk 已取代 Piik。若是同一台机器重跑（Piik 装过），这里先把它停干净，
+# 避免两套远控同时抢声卡/带宽。全新机器上此步会直接返回 retired=True (never installed)。
+$retireScript = Join-Path $PSScriptRoot 'retire-piik.ps1'
+if (Test-Path $retireScript) {
+  try {
+    & $retireScript 2>&1 | ForEach-Object { L ('  retire| ' + $_) }
+    L ('retire-piik exit=' + $LASTEXITCODE)
+  } catch { L ('retire-piik failed: ' + $_.Exception.Message) }
+} else {
+  L ('WARN: retire-piik.ps1 not found at ' + $retireScript)
+}
+
 # ---------------- 0. 虚拟声卡（必须先于 BilldDesk 启动） ----------------
 # 无 GPU 虚机默认一个渲染端点都没有；没有端点，BilldDesk 就无法做系统声音环回。
 $audioScript = Join-Path $PSScriptRoot 'install-virtual-audio.ps1'
