@@ -8,6 +8,7 @@ import { RemoteTouchpad } from "../../remote-control/touchpad";
 import { RemoteViewport } from "../../remote-control/viewport";
 import { RemoteGamepad } from "../../remote-control/gamepad";
 import { matchesRemoteShortcut, remoteTextAvailable, remoteGamepadAvailable } from "../../remote-control/protocol";
+import { jogThumbOffset, jogWheelDelta, WHEEL_NOTCH } from "../../remote-control/wheel-jog";
 import { readRoomPreferences, saveRoomPreferences } from "../../lib/room-preferences";
 import { RemoteKeyboard } from "./RemoteKeyboard";
 import { Btn } from "./primitives";
@@ -45,6 +46,14 @@ export function RemoteControl({ channel, videoRef, available, pictureFit, pictur
   const viewport = useRef<RemoteViewport | null>(null);
   // 曾经真正拿到过控制权（用于掉线后自动重取；用户主动停止时清零）。
   const regain = useRef(false);
+  // 自动重取的定时器挂在 ref 上：服务端每推一条新状态都会让下面的 effect
+  // 重跑，若用 effect 的 cleanup 清定时器，连续两条状态就能让它永远不触发。
+  const regainTimer = useRef<number | null>(null);
+  const regainAttempts = useRef(0);
+  // 滚动拨盘：记录按下点与已发送的档位；抬起后滑块弹回中央。
+  const jog = useRef<{ id: number; y: number; steps: number } | null>(null);
+  const [jogOffset, setJogOffset] = useState(0);
+  const [jogActive, setJogActive] = useState(false);
   const canControl = available && presentation === "playing";
   const active = state?.state === "active" && canControl && channel?.readyState === "open";
   const controlled = (state?.state === "active" || state?.state === "suspended") && canControl && channel?.readyState === "open";
@@ -202,14 +211,54 @@ export function RemoteControl({ channel, videoRef, available, pictureFit, pictur
   // 掉线自愈：连接恢复后若此前真正拥有过控制权、且房间是自动授权的 room 模式，
   // 自动重新申请一次。这样 ICE 抖动/重连后不必让用户刷新整个页面才能拿回控制权。
   // 只在 state 回到 ready（无人控制、可申请）时触发，避免 failed/busy 反复重试。
+  //
+  // 定时器**不能**放进 effect 的 cleanup：`state` 每次推送都是新对象，effect 会
+  // 反复重跑，而 Host 在抖动时会连推多条状态 —— 那样 800ms 的窗口永远等不到。
+  const clearRegain = useCallback(() => {
+    if (regainTimer.current !== null) { window.clearTimeout(regainTimer.current); regainTimer.current = null; }
+  }, []);
+  useEffect(() => clearRegain, [clearRegain]);
   useEffect(() => {
-    if (controlled) { regain.current = true; return; }
+    if (controlled) {
+      regain.current = true; regainAttempts.current = 0; clearRegain();
+      return;
+    }
+    // 已经拿到 grant 但画面被判为不可控（暂停/画中画），重取没有意义。
+    if (state?.state === "active") { regainAttempts.current = 0; clearRegain(); return; }
+    // room 模式下 pending 超过 6 秒说明请求或回执在链路上丢了：重发一次。
+    if (state?.state === "pending" && state.mode === "room") {
+      if (regainTimer.current !== null || regainAttempts.current >= 20) return;
+      regainTimer.current = window.setTimeout(() => {
+        regainTimer.current = null;
+        regainAttempts.current += 1;
+        session.current?.request();
+      }, 6000);
+      return;
+    }
     if (!regain.current || !canControl) return;
     if (!channel || channel.readyState !== "open") return;
     if (!state || state.mode !== "room" || state.state !== "ready") return;
-    const timer = window.setTimeout(() => { session.current?.request(); }, 800);
-    return () => window.clearTimeout(timer);
-  }, [controlled, canControl, channel, state]);
+    if (regainTimer.current !== null || regainAttempts.current >= 20) return;
+    // 退避：前两次 0.8s，之后 2s、4s，避免在断流时刷屏请求。
+    const attempt = regainAttempts.current;
+    const delay = attempt < 2 ? 800 : attempt < 4 ? 2000 : 4000;
+    regainTimer.current = window.setTimeout(() => {
+      regainTimer.current = null;
+      regainAttempts.current += 1;
+      session.current?.request();
+    }, delay);
+  }, [controlled, canControl, channel, state, clearRegain]);
+  // 手机切回页面时浏览器可能把视频留在暂停态，而暂停就等于 canControl=false
+  // （控制入口会被整块禁掉）。这里只在确实暂停时尝试恢复播放。
+  useEffect(() => {
+    const resume = () => {
+      const video = videoRef.current;
+      if (document.hidden || !video || video.ended || !video.paused || !video.srcObject) return;
+      void video.play().catch(() => { /* 自动播放被策略拦下时保持原样 */ });
+    };
+    document.addEventListener("visibilitychange", resume);
+    return () => document.removeEventListener("visibilitychange", resume);
+  }, [videoRef]);
 
   if (!channel || channel.readyState !== "open" || !state || state.mode === "off") return null;
   const point = (clientX: number, clientY: number) => {
@@ -360,12 +409,57 @@ export function RemoteControl({ channel, videoRef, available, pictureFit, pictur
         </svg>
       </div>}
       {/* Touch has no secondary button: long press is the drag gesture, so the
-          right click needs its own control. Two-finger tap stays as a shortcut. */}
-      {controlled && touchControls && <div className="lr-remote-touch-actions" role="group" aria-label={t("remote.title")}>
-        <button type="button" onClick={() => touchpad.current?.click(2)}>右键</button>
-        <button type="button" onClick={() => touchpad.current?.click(1)}>中键</button>
-        <button type="button" onClick={() => touchpad.current?.doubleClick()}>双击</button>
-      </div>}
+          right click needs its own control. Two-finger tap stays as a shortcut.
+          The scroll dial replaces the middle button, which no touch surface
+          could reach on a remote desktop; it sits higher than the button row
+          because the bottom edge of a phone is outside the comfortable thumb
+          arc. ▲/▼ = one notch, the slider is a relative dial (2 notches per
+          step) so a single stroke can travel several screens. */}
+      {controlled && touchControls && <>
+        <div className="lr-remote-scroll" role="group" aria-label="滚动">
+          <button type="button" className="lr-remote-scroll-step" aria-label="向上滚动"
+            onPointerDown={event => { event.preventDefault(); event.stopPropagation(); input({ type: "wheel", delta: WHEEL_NOTCH }); }}>
+            <svg viewBox="0 0 14 9" aria-hidden="true"><path d="M7 0 14 9H0Z" /></svg>
+          </button>
+          <div className={`lr-remote-jog${jogActive ? " is-dragging" : ""}`} role="slider" aria-label="拖动滚动" aria-valuemin={-100} aria-valuemax={100} aria-valuenow={Math.round(jogOffset * 100)}
+            onPointerDown={event => {
+              event.preventDefault(); event.stopPropagation();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              jog.current = { id: event.pointerId, y: event.clientY, steps: 0 };
+              setJogActive(true); setJogOffset(0);
+            }}
+            onPointerMove={event => {
+              const current = jog.current;
+              if (!current || current.id !== event.pointerId) return;
+              event.preventDefault(); event.stopPropagation();
+              const travel = event.clientY - current.y;
+              const sample = jogWheelDelta(travel, current.steps);
+              if (sample.steps !== current.steps) {
+                current.steps = sample.steps;
+                input({ type: "wheel", delta: sample.delta });
+              }
+              setJogOffset(jogThumbOffset(travel, event.currentTarget.clientHeight));
+            }}
+            onPointerUp={event => {
+              if (jog.current?.id !== event.pointerId) return;
+              event.stopPropagation();
+              jog.current = null; setJogActive(false); setJogOffset(0);
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onPointerCancel={() => { jog.current = null; setJogActive(false); setJogOffset(0); }}
+            onLostPointerCapture={() => { jog.current = null; setJogActive(false); setJogOffset(0); }}>
+            <span className="lr-remote-jog-thumb" style={{ transform: `translateY(${jogOffset * 38}px)` }} />
+          </div>
+          <button type="button" className="lr-remote-scroll-step" aria-label="向下滚动"
+            onPointerDown={event => { event.preventDefault(); event.stopPropagation(); input({ type: "wheel", delta: -WHEEL_NOTCH }); }}>
+            <svg viewBox="0 0 14 9" aria-hidden="true"><path d="M0 0h14L7 9Z" /></svg>
+          </button>
+        </div>
+        <div className="lr-remote-touch-actions" role="group" aria-label={t("remote.title")}>
+          <button type="button" onClick={() => touchpad.current?.click(2)}>右键</button>
+          <button type="button" onClick={() => touchpad.current?.doubleClick()}>双击</button>
+        </div>
+      </>}
       {active && keyboardOpen && <RemoteKeyboard input={input} touch={touchControls} platform={state.platform}
         allowText={remoteTextAvailable(state)}
         initialPage={keyboardPage}
