@@ -32,6 +32,8 @@ export function RemoteControl({ channel, videoRef, available, pictureFit, pictur
   const [password, setPassword] = useState("");
   const [gamepadConnected, setGamepadConnected] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [keyboardPage, setKeyboardPage] = useState<"text" | undefined>(undefined);
+  const keyboardSeeded = useRef(false);
   const [keyboardDocument, setKeyboardDocument] = useState<Document | null>(null);
   const keyboardDetached = Boolean(keyboardDocument && keyboardDocument !== document);
   const [touch, setTouch] = useState(false);
@@ -229,6 +231,16 @@ export function RemoteControl({ channel, videoRef, available, pictureFit, pictur
     } else session.current?.request();
   };
   const touchControls = touch || matchMedia("(pointer: coarse)").matches;
+  // A touch device has no hardware keyboard, so the first open lands on the text
+  // entry whose local <textarea> raises the system IME. Remembered pages win
+  // afterwards, otherwise a deliberate switch back to ABC would never stick.
+  const openKeyboard = () => {
+    reset();
+    const seed = !keyboardSeeded.current && touchControls ? "text" as const : undefined;
+    keyboardSeeded.current = true;
+    setKeyboardPage(seed);
+    setKeyboardOpen(true);
+  };
   const statusIcon = state.reason === "busy" ? "users" : state.reason === "password" || state.reason === "gamepad" || state.state === "failed" ? "alert"
     : state.state === "suspended" ? "pause" : gamepadConnected && controlled ? "gamepad" : "clock";
   const feedback: CopyKey | undefined = state.reason ? `remote.reason.${state.reason}`
@@ -255,7 +267,7 @@ export function RemoteControl({ channel, videoRef, available, pictureFit, pictur
         onClick={() => {
           if (keyboardDetached) keyboardDocument?.defaultView?.focus();
           else if (keyboardOpen) closeKeyboard();
-          else { reset(); setKeyboardOpen(true); }
+          else openKeyboard();
         }} />
     </span>
     {parent && (controlled || state.state === "pending" || state.state === "failed" || state.reason || passwordOpen) && createPortal(<>
@@ -347,8 +359,16 @@ export function RemoteControl({ channel, videoRef, available, pictureFit, pictur
           <path d="M2 2v21l6-6 5 9 4-2-5-9h9Z" />
         </svg>
       </div>}
+      {/* Touch has no secondary button: long press is the drag gesture, so the
+          right click needs its own control. Two-finger tap stays as a shortcut. */}
+      {controlled && touchControls && <div className="lr-remote-touch-actions" role="group" aria-label={t("remote.title")}>
+        <button type="button" onClick={() => touchpad.current?.click(2)}>右键</button>
+        <button type="button" onClick={() => touchpad.current?.click(1)}>中键</button>
+        <button type="button" onClick={() => touchpad.current?.doubleClick()}>双击</button>
+      </div>}
       {active && keyboardOpen && <RemoteKeyboard input={input} touch={touchControls} platform={state.platform}
         allowText={remoteTextAvailable(state)}
+        initialPage={keyboardPage}
         releaseKey={releaseKey} onReleaseKeyChange={key => { setReleaseKey(key); saveRoomPreferences({ remoteReleaseKey: key }); }}
         onSurfaceChange={keyboardSurfaceChanged}
         mouseControl={!touchControls && "requestPointerLock" in HTMLElement.prototype && <span className="lr-remote-game-mouse"><Btn icon="gamepad" size="compact"
