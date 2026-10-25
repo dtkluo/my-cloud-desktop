@@ -1,0 +1,129 @@
+.lr-tv-screen > .lr-remote-input-surface { position: absolute; inset: 0; z-index: 3; cursor: default; touch-action: none; overflow: hidden; outline: 2px solid var(--primary); outline-offset: -2px; border-radius: inherit; }
+.lr-remote-input-surface.is-suspended { outline-color: var(--muted); cursor: default; pointer-events: none; }
+.lr-remote-input-surface.is-locked { cursor: none; }
+.lr-remote-viewer-control { position: relative; display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.lr-remote-feedback { display: flex; align-items: center; gap: 5px; max-width: 180px; font-size: 12px; line-height: 1.3; color: inherit; }
+.lr-remote-feedback > svg { flex: none; }
+.lr-tv-screen > .lr-playback:has(.lr-remote-feedback) { opacity: 1; transform: none; pointer-events: auto; }
+.lr-remote-trigger { display: inline-flex; position: relative; }
+.lr-remote-count { position: absolute; top: -4px; right: -3px; min-width: 20px; padding: 0 5px; border: 2px solid var(--paper); border-radius: 12px; background: var(--action-deep); color: var(--action-ink); font: 600 11px/16px var(--font); text-align: center; pointer-events: none; }
+.lr-remote-panel-body { padding-block: 14px 6px; }
+.lr-remote-panel-body > .lr-switch-item { display: flex; width: fit-content; margin-bottom: 12px; }
+.lr-remote-enable-pending { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.lr-remote-enable-pending > svg { color: var(--muted); }
+.lr-remote-panel-header { display: flex; align-items: center; gap: 10px; margin: -4px -4px 10px 0; }
+.lr-remote-panel-header strong { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; font-size: 14px; }
+.lr-remote-settings { display: grid; gap: 10px; padding: 12px 0; }
+.lr-remote-field-label { font-size: 12px; font-weight: 650; }
+.lr-remote-modes.lr-toggle { display: grid; }
+.lr-remote-modes > .lr-comic-tip-wrap { min-width: 0; }
+.lr-remote-modes button { min-width: 0; padding: 6px 4px; line-height: 1.3; white-space: normal; }
+.lr-remote-policy-actions { display: flex; align-items: center; gap: 8px; }
+.lr-remote-settings > .lr-remote-policy-actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+.lr-remote-settings > .lr-remote-policy-actions > * { min-width: 0; }
+.lr-remote-settings .lr-remote-policy-actions .lr-btn { width: 100%; }
+.lr-remote-policy-actions .lr-input { flex: 1; min-width: 0; }
+.lr-remote-policy-actions .lr-input input { min-width: 0; width: 100%; }
+.lr-remote-password p { display: flex; align-items: center; gap: 6px; color: var(--warn); margin: 8px auto 0; font-size: 12px; }
+.lr-remote-password p.is-bad { color: var(--danger); }
+.lr-remote-password > * { max-width: 360px; margin-inline: auto; }
+.lr-remote-panel p { font-size: 12px; line-height: 1.5; margin: 0; }
+.lr-remote-panel p[role="alert"] { color: var(--danger); }
+.lr-remote-request p, .lr-remote-panel p[role="alert"] { display: flex; align-items: center; gap: 6px; }
+.lr-remote-request p > svg, .lr-remote-panel p[role="alert"] > svg { flex: none; }
+.lr-remote-request .lr-remote-request-details { flex-wrap: wrap; gap: 4px 12px; margin: 0; font-size: 12px; line-height: 1.5; }
+.lr-remote-panel-body > .lr-remote-note + .lr-remote-note { margin-top: 8px; }
+.lr-remote-panel .lr-remote-note > svg { vertical-align: middle; }
+.lr-remote-note, .lr-remote-request p { color: var(--muted); }
+.lr-remote-requests { padding-bottom: 12px; margin-bottom: 4px; border-bottom: 1px solid var(--wall-2); }
+.lr-remote-request { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 0; }
+.lr-remote-request + .lr-remote-request { border-top: 1px solid var(--control-edge); }
+.lr-remote-request-info { grid-column: 1 / -1; min-width: 0; display: grid; gap: 8px; }
+.lr-remote-request-stop { grid-column: 2; grid-row: 1; align-self: start; }
+.lr-remote-request-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-width: 100%; }
+.lr-remote-request.is-pending > .lr-remote-request-actions { grid-column: 1 / -1; }
+.lr-remote-request-actions > .lr-comic-tip-wrap { min-width: 0; }
+.lr-remote-request-actions .lr-btn { width: 100%; }
+.lr-remote-note kbd { white-space: nowrap; font: 12px var(--mono); }
+.lr-remote-shortcut { margin-block: 12px; text-align: start; }
+.lr-remote-touch-cursor { position: absolute; width: 22px; height: 26px; left: 50%; top: 50%; pointer-events: none; filter: drop-shadow(0 1px 2px #0008); }
+.lr-remote-touch-cursor path { fill: #fff; stroke: #22313e; stroke-width: 1.5; stroke-linejoin: round; }
+.lr-remote-game-mouse { display: flex; justify-content: center; margin-top: 8px; }
+:is(.lr-remote-keyboard, .lr-remote-password) { grid-area: 3 / 1; z-index: 4; padding: 10px 12px 12px; background: var(--paper); color: var(--ink); border-top: 1px solid var(--control-edge); }
+:is(.lr-remote-keyboard, .lr-remote-password) .lr-input { padding: 0 10px; }
+:is(.lr-remote-keyboard, .lr-remote-password) input { font-size: 16px; }
+.lr-remote-keys { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+.lr-remote-shortcuts:has(> :nth-child(4):last-child) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.lr-remote-keyboard { min-height: 0; max-height: 65dvh; overflow-y: auto; overscroll-behavior: contain; outline: none; }
+.lr-remote-keyboard > .lr-remote-panel-header { position: sticky; top: -10px; z-index: 1; background: var(--paper); }
+.lr-remote-keyboard > * { max-width: 640px; margin-inline: auto; }
+.lr-remote-keyboard .lr-remote-key-pages { --selection-item-size: calc(var(--control-compact-size) - 12px); display: grid; grid-template-columns: repeat(var(--lr-segments), minmax(0, 1fr)); margin-bottom: 12px; }
+.lr-remote-keyboard .lr-remote-key-pages button { min-width: 0; padding: 4px 8px; }
+.lr-remote-key-row { display: flex; justify-content: center; gap: 4px; margin-bottom: 6px; }
+.lr-remote-key-row .lr-chip { flex: 1; }
+.lr-remote-key-layout.is-letters .lr-remote-key-row:not(:last-child) .lr-chip { flex: 0 1 calc((100% - 36px) / 10); }
+.lr-remote-modifier-key { display: flex; flex: 1; min-width: 0; }
+.lr-remote-modifier-key .lr-chip { width: 100%; }
+.lr-remote-key-layout .lr-remote-modifier-key, .lr-remote-key-layout [data-key="Backspace"] { flex: 1.5; }
+.lr-remote-bottom-row { margin-top: 10px; }
+.lr-remote-bottom-row > .lr-remote-modifier-key { min-width: 40px; }
+.lr-remote-bottom-row [data-key="Space"] { flex: 3; }
+.lr-remote-bottom-row [data-key="Enter"] { flex: 2; min-width: 44px; }
+.lr-remote-navigation { display: flex; align-items: end; gap: 12px; margin-top: 10px; }
+.lr-remote-navigation-actions { flex: 1; min-width: 0; }
+.lr-remote-navigation-actions.is-text { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.lr-remote-navigation-actions.is-editing { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.lr-remote-navigation-actions.is-editing:has(> :nth-child(5):last-child) > :first-child { grid-column: 2; }
+.lr-remote-arrows { flex: 0 0 36%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.lr-remote-arrows [data-key="ArrowUp"] { grid-column: 2; }
+.lr-remote-arrows [data-key="ArrowLeft"] { grid-column: 1; }
+.lr-remote-text-entry { display: grid; gap: 8px; margin-bottom: 14px; }
+.lr-remote-text-entry .lr-remote-text-field { display: flex; flex-direction: column; align-items: stretch; height: auto; gap: 8px; padding: 10px; }
+.lr-remote-text-field textarea { width: 100%; min-height: 96px; max-height: 30dvh; resize: vertical; padding: 0; border: 0; outline: 0; background: transparent; color: inherit; font: 16px/1.5 var(--mono); tab-size: 4; }
+.lr-remote-text-field textarea::placeholder { color: var(--muted); font-family: var(--font); opacity: 1; }
+.lr-remote-text-actions { display: flex; justify-content: end; }
+.lr-remote-keyboard .lr-remote-text-entry p[role="alert"] { color: var(--danger); }
+.lr-remote-text-entry .lr-btn { flex: none; }
+.lr-remote-keyboard .lr-remote-text-entry p { margin: 0; text-align: start; }
+:is(.lr-remote-keys, .lr-remote-key-row) .lr-chip { justify-content: center; padding: 4px 0; width: 100%; min-width: 0; min-height: 38px; border-width: 1px; border-radius: 9px; font: 600 12px var(--mono); letter-spacing: 0; white-space: nowrap; touch-action: none; }
+.lr-remote-keyboard p { margin-block: 8px 0; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.5; }
+:is(.lr-room.is-theater .lr-tv-screen, .lr-tv-screen:fullscreen):has(.lr-remote-keyboard) { grid-template-rows: minmax(min(120px, 30dvh), 1fr) auto minmax(0, auto); }
+:is(.lr-room.is-theater .lr-tv-screen, .lr-tv-screen:fullscreen) .lr-remote-keyboard { max-height: none; overflow-y: auto; overscroll-behavior: contain; }
+:is(.lr-room.is-theater .lr-tv-screen, .lr-tv-screen:fullscreen) .lr-remote-keyboard > .lr-remote-panel-header { position: sticky; top: -10px; z-index: 1; background: var(--paper); }
+.lr-panel-window .lr-remote-keyboard { min-height: 100dvh; border: 0; padding: 12px; }
+.lr-panel-window .lr-remote-keyboard > .lr-remote-panel-header { display: none; }
+/* In short fullscreen/theater viewports, keep the picture beside the keyboard
+   instead of spending the entire height on keys and playback controls. */
+@media (min-width: 600px) and (max-height: 520px) and (orientation: landscape) {
+  :is(.lr-room.is-theater .lr-tv-screen, .lr-tv-screen:fullscreen):has(.lr-remote-keyboard) { grid-template: minmax(0, 1fr) auto / minmax(0, 1fr) minmax(280px, 44%); }
+  :is(.lr-room.is-theater .lr-tv-screen, .lr-tv-screen:fullscreen) .lr-remote-keyboard { grid-area: 1 / 2 / 3 / 3; border-top: 0; border-left: 1px solid var(--control-edge); }
+  :is(.lr-room.is-theater .lr-tv-screen, .lr-tv-screen:fullscreen):has(.lr-remote-keyboard) > .lr-playback { width: 100%; container: media-stage / inline-size; gap: 4px; padding-inline: 6px; }
+  :is(.lr-room.is-theater .lr-tv-screen, .lr-tv-screen:fullscreen) .lr-remote-key-row .lr-chip { min-height: 32px; }
+}
+@media (max-width: 580px) {
+  .lr-remote-shortcuts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .lr-remote-shortcuts:has(> :nth-child(4):last-child) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 380px) {
+  .lr-remote-keyboard { padding-inline: 6px; }
+  .lr-remote-key-row { gap: 3px; }
+  .lr-remote-key-layout.is-letters .lr-remote-key-row:not(:last-child) .lr-chip { flex-basis: calc((100% - 27px) / 10); }
+}
+@container media-stage (max-width: 640px) {
+  .lr-remote-feedback { position: absolute; top: -2px; right: -2px; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--paper); box-shadow: 0 0 0 1px var(--control-edge); pointer-events: none; }
+  .lr-remote-feedback > span:not(.visually-hidden) { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+
+.lr-comic-tip-wrap.lr-remote-combine-hint { display: flex; justify-content: center; }
+.lr-remote-combine-keys { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 10px; font-size: 12px; cursor: pointer; }
+.lr-remote-combine-keys input { width: 16px; height: 16px; margin: 0; accent-color: var(--action); }
+.lr-remote-combine-keys > span { display: inline-flex; align-items: center; gap: 6px; }
+.lr-remote-combine-keys kbd {
+  display: grid; place-items: center; min-width: 24px; height: 24px;
+  border: 1px solid var(--line); border-radius: 5px; font: 600 14px var(--mono);
+}
+/* Touch has no secondary button; these float over the picture while a grant is
+   active. Two-finger tap still works as the shortcut, this is the reliable one. */
+.lr-tv-screen > .lr-remote-touch-actions { grid-area: 1 / 1 / 3 / 2; align-self: end; justify-self: end; z-index: 4; display: flex; gap: 8px; margin: 0 10px 10px 0; }
+.lr-remote-touch-actions > button { min-width: 48px; height: 38px; padding: 0 12px; border: 0; border-radius: 10px; background: rgb(0 0 0 / .58); color: #fff; font: 600 13px/1 var(--font); backdrop-filter: blur(6px); touch-action: manipulation; }
+.lr-remote-touch-actions > button:active { background: rgb(0 0 0 / .8); }
