@@ -28,7 +28,11 @@ param(
 
   [string]$FallbackPassword = '',
 
-  [string]$FixedPassword = ''
+  [string]$FixedPassword = '',
+
+  [string]$LoginUser = '',
+
+  [string]$LoginPass = ''
 
 )
 
@@ -516,6 +520,154 @@ while ($popTries -lt 3) {
 
 
 
+# ---------- 2.6 主控端自动登录（-LoginUser/-LoginPass 传入时执行） ----------
+
+# 需求（2026-10-27）：本机 BilldDesk 登录 dtka1 账号后，主人手机主控端登录同一
+
+# 账号即可在「设备」页直接远程，免设备码/连接密码。绑定关系持久存在服务端账号
+
+# 下、连接密码已被 bootstrap 固定为恒定值，所以每次开机只需确保客户端处于登录态。
+
+# 流程：点「主控」tab -> OCR 判登录态 -> 未登录则填账号密码点「确定」-> 回「被控」tab。
+
+# 坐标为 600 基准（v0.621 于 1024x768 实测）：主控(185,560) 被控(65,560)、
+
+# 用户名框(300,216) 密码框(300,271) 确定(300,326)。
+
+# 判定依据：登录页独有「用户名/注册」字样；已登录主控页独有「设备代码」字样。
+
+$script:LoginState = ''
+
+if ($LoginUser -and $LoginPass) {
+
+  try {
+
+    Add-Type -AssemblyName System.Windows.Forms
+
+    $sf = $geo.W / 600.0
+
+    $ofx = $geo.L; $ofy = $geo.T
+
+    [BdWin]::Click($ofx + [int](185 * $sf), $ofy + [int](560 * $sf))
+
+    Start-Sleep -Milliseconds 1500
+
+    $loginShot = Join-Path $OutDir 'shot-login.png'
+
+    $lgeo = Shot $loginShot
+
+    $needLogin = $false
+
+    $loggedIn = $false
+
+    if ($lgeo) {
+
+      $ll = OcrImage $loginShot
+
+      foreach ($ln in $ll) { L ('  login-ocr| ' + $ln.Text) }
+
+      foreach ($ln in $ll) {
+
+        if ($ln.Text -match '设备代码') { $loggedIn = $true; break }
+
+      }
+
+      if (-not $loggedIn) {
+
+        foreach ($ln in $ll) {
+
+          if ($ln.Text -match '用户名|注\s*册') { $needLogin = $true; break }
+
+        }
+
+      }
+
+    }
+
+    if ($needLogin) {
+
+      L 'login page detected, submitting account'
+
+      [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](216 * $sf))
+
+      Start-Sleep -Milliseconds 600
+
+      [System.Windows.Forms.SendKeys]::SendWait('^a')
+
+      Start-Sleep -Milliseconds 200
+
+      [System.Windows.Forms.SendKeys]::SendWait($LoginUser)
+
+      Start-Sleep -Milliseconds 500
+
+      [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](271 * $sf))
+
+      Start-Sleep -Milliseconds 600
+
+      [System.Windows.Forms.SendKeys]::SendWait('^a')
+
+      Start-Sleep -Milliseconds 200
+
+      [System.Windows.Forms.SendKeys]::SendWait($LoginPass)
+
+      Start-Sleep -Milliseconds 500
+
+      [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](326 * $sf))
+
+      Start-Sleep -Milliseconds 3000
+
+      $script:LoginState = 'submitted'
+
+      $vgeo = Shot $loginShot
+
+      if ($vgeo) {
+
+        $vl = OcrImage $loginShot
+
+        foreach ($ln in $vl) { L ('  login-vfy| ' + $ln.Text) }
+
+        foreach ($ln in $vl) {
+
+          if ($ln.Text -match '设备代码') { $script:LoginState = 'ok'; break }
+
+        }
+
+      }
+
+      L ('login state=' + $script:LoginState)
+
+    } elseif ($loggedIn) {
+
+      $script:LoginState = 'already'
+
+      L 'already logged in, skip'
+
+    } else {
+
+      $script:LoginState = 'unknown'
+
+      L 'WARN: could not classify login page'
+
+    }
+
+    # 回「被控」tab 继续设备码采集
+
+    [BdWin]::Click($ofx + [int](65 * $sf), $ofy + [int](560 * $sf))
+
+    Start-Sleep -Milliseconds 1500
+
+    $geo = Shot $shotPath
+
+    if (-not $geo) { L 'WARN: shot failed after switching back to 被控' }
+
+  } catch { L ('login flow failed: ' + $_.Exception.Message); $script:LoginState = 'error' }
+
+}
+
+
+
+
+
 $lines = OcrImage $shotPath
 
 foreach ($ln in $lines) { L ('  ocr| ' + $ln.Text) }
@@ -803,6 +955,10 @@ $result = [ordered]@{
   device_uuid = $devCode
 
   password  = $password
+
+  account   = $LoginUser
+
+  login     = if ($LoginUser) { if ($script:LoginState) { $script:LoginState } else { 'skipped' } } else { '' }
 
   window    = ($geo.W.ToString() + 'x' + $geo.H.ToString())
 
