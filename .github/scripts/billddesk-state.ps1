@@ -56,6 +56,7 @@ $node = [ordered]@{
     password       = [string]$r.password
     account        = [string]$r.account
     login          = [string]$r.login
+    bind           = [string]$r.bind
     kind           = 'webrtc-native'
     window         = [string]$r.window
     session        = [int]$r.session
