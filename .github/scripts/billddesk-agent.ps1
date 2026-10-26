@@ -314,7 +314,27 @@ function Shot([string]$path) {
 
   $g.Dispose()
 
-  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  # GDI+ Save 偶发 generic error（目标文件被上一轮 OCR/杀软短暂锁住，2026-10-27 实测）：
+  # 先删旧文件再带 3 次重试保存，避免整轮白跑。
+  if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+
+  $saveTries = 0
+
+  while ($true) {
+
+    try { $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); break }
+
+    catch {
+
+      $saveTries++
+
+      if ($saveTries -ge 3) { $bmp.Dispose(); return $null }
+
+      Start-Sleep -Milliseconds 500
+
+    }
+
+  }
 
   $bmp.Dispose()
 
@@ -322,7 +342,89 @@ function Shot([string]$path) {
 
 }
 
+# Shot2：带重试 + 兜底几何体的截图。
+# 依据（2026-10-27 实测）：Flutter 窗口在切页/动画瞬间 GetWindowRect 会短暂返回 0，
+# 甚至开机首启 12s+ 才就绪。传入了上次已知几何体 $fallback 时，rect 空的情况下
+# 直接按 fallback 坐标抓屏（窗口位置不会瞬移，内容大概率正确）。
+function Shot2([string]$path, $fallback) {
 
+  for ($i = 0; $i -lt 5; $i++) {
+
+    $g = Shot $path
+
+    if ($g) { return $g }
+
+    if ($fallback) {
+
+      try {
+
+        $bmp = New-Object System.Drawing.Bitmap($fallback.W, $fallback.H)
+
+        $g2 = [System.Drawing.Graphics]::FromImage($bmp)
+
+        $g2.CopyFromScreen($fallback.L, $fallback.T, 0, 0, $bmp.Size)
+
+        $g2.Dispose()
+
+        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+
+        $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+
+        $bmp.Dispose()
+
+        return $fallback
+
+      } catch { return $null }
+
+    }
+
+    Start-Sleep -Milliseconds 800
+
+  }
+
+  return $null
+
+}
+
+
+
+# 登录页像素判定：600 基准 x[165,230] y[158,198] 区域出现黄色像素 = 登录页的
+# 黄色「登录」tab（2026-10-27 bd-mc1/bd-mc3 截图实测对比：已登录主控页同位置
+# 是白色背景）。中文 OCR 不可用（Windows OCR 引擎 en-US 读不了中文），所以
+# 登录态判定全部走像素，不依赖 OCR 语言。
+function Test-LoginTabPixel([string]$imgPath, $ggeo, [double]$sc) {
+
+  $bmp = New-Object System.Drawing.Bitmap($ggeo.W, $ggeo.H)
+
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+
+  $g.DrawImage([System.Drawing.Image]::FromFile($imgPath), 0, 0)
+
+  $g.Dispose()
+
+  $hit = $false
+
+  $px0 = [int](165 * $sc); $px1 = [int](230 * $sc)
+
+  $py0 = [int](158 * $sc); $py1 = [int](198 * $sc)
+
+  for ($yy = $py0; $yy -le $py1 -and -not $hit; $yy++) {
+
+    for ($xx = $px0; $xx -le $px1; $xx++) {
+
+      $c = $bmp.GetPixel($xx, $yy)
+
+      if ($c.R -gt 200 -and $c.G -gt 140 -and $c.B -lt 120) { $hit = $true; break }
+
+    }
+
+  }
+
+  $bmp.Dispose()
+
+  return $hit
+
+}
 
 # ---------- 1. 等窗口 ----------
 
@@ -392,13 +494,17 @@ L ('window=' + [BdWin]::Main + ' title=' + [BdWin]::MainTitle)
 
 # 实测 22:26:42 找到窗口、22:26:44 量到的宽高还是 0，于是整轮直接判 bad-rect 退出，
 
-# 白跑一次开机。这里改成「轮询到 rect 有效为止」，最多等 12 秒。
+# 白跑一次开机。这里改成「轮询到 rect 有效为止」。2026-10-27 再教训：开机首启
+
+# （workflow 装完立刻跑）rect 就绪花了 12 秒以上，12s 上限导致 bad-rect 误报
+
+# 『启动异常』——放宽到 30s。
 
 $shotPath = Join-Path $OutDir 'shot-home.png'
 
 $geo = $null
 
-$rectDeadline = (Get-Date).AddSeconds(12)
+$rectDeadline = (Get-Date).AddSeconds(30)
 
 $rectTries = 0
 
@@ -420,7 +526,7 @@ if (-not $geo) {
 
   L 'BAD_WINDOW_RECT'
 
-  (@{ ok = $false; state = 'bad-rect'; error = 'window rect stayed empty for 12s'; session = $sess } | ConvertTo-Json) |
+  (@{ ok = $false; state = 'bad-rect'; error = 'window rect stayed empty for 30s'; session = $sess } | ConvertTo-Json) |
 
     Out-File (Join-Path $OutDir 'billddesk.json') -Encoding utf8
 
@@ -512,9 +618,9 @@ while ($popTries -lt 3) {
 
   Start-Sleep -Milliseconds 1200
 
-  $geo = Shot $shotPath
+  $ng = Shot2 $shotPath $geo
 
-  if (-not $geo) { L 'popup: shot failed after click'; break }
+  if ($ng) { $geo = $ng } else { L 'popup: shot failed after click'; break }
 
 }
 
@@ -554,7 +660,7 @@ if ($LoginUser -and $LoginPass) {
 
     $loginShot = Join-Path $OutDir 'shot-login.png'
 
-    $lgeo = Shot $loginShot
+    $lgeo = Shot2 $loginShot $geo
 
     $needLogin = $false
 
@@ -566,21 +672,12 @@ if ($LoginUser -and $LoginPass) {
 
       foreach ($ln in $ll) { L ('  login-ocr| ' + $ln.Text) }
 
-      foreach ($ln in $ll) {
+      # 像素判定登录态（中文 OCR 不可用，见 Test-LoginTabPixel 注释）
+      $needLogin = Test-LoginTabPixel $loginShot $lgeo $sf
 
-        if ($ln.Text -match '设备代码') { $loggedIn = $true; break }
+      $loggedIn = (-not $needLogin)
 
-      }
-
-      if (-not $loggedIn) {
-
-        foreach ($ln in $ll) {
-
-          if ($ln.Text -match '用户名|注\s*册') { $needLogin = $true; break }
-
-        }
-
-      }
+      if ($needLogin) { L 'login page detected (yellow tab pixel)' }
 
     }
 
@@ -618,7 +715,7 @@ if ($LoginUser -and $LoginPass) {
 
       $script:LoginState = 'submitted'
 
-      $vgeo = Shot $loginShot
+      $vgeo = Shot2 $loginShot $lgeo
 
       if ($vgeo) {
 
@@ -626,11 +723,8 @@ if ($LoginUser -and $LoginPass) {
 
         foreach ($ln in $vl) { L ('  login-vfy| ' + $ln.Text) }
 
-        foreach ($ln in $vl) {
-
-          if ($ln.Text -match '设备代码') { $script:LoginState = 'ok'; break }
-
-        }
+        # 验证：黄色「登录」tab 消失 = 登录成功（像素法，与判定同源）
+        if (-not (Test-LoginTabPixel $loginShot $vgeo $sf)) { $script:LoginState = 'ok' }
 
       }
 
@@ -644,9 +738,84 @@ if ($LoginUser -and $LoginPass) {
 
     } else {
 
-      $script:LoginState = 'unknown'
+      # 兜底：第一次 Shot 失败（窗口 rect 瞬时为空）。重试截图 + 顺手点一下
+      # 可能存在的弹窗 ×（600 基准 (432,175)，无弹窗时是空白区域，无害），
+      # 再用像素法分类。
+      L 'WARN: login shot failed, retry with popup X fallback'
 
-      L 'WARN: could not classify login page'
+      [BdWin]::Click($ofx + [int](432 * $sf), $ofy + [int](175 * $sf))
+
+      Start-Sleep -Milliseconds 1500
+
+      $lgeo = Shot2 $loginShot $geo
+
+      if ($lgeo) {
+
+        $ll2 = OcrImage $loginShot
+
+        foreach ($ln in $ll2) { L ('  login-ocr2| ' + $ln.Text) }
+
+        if (Test-LoginTabPixel $loginShot $lgeo $sf) {
+
+          L 'login page confirmed after popup dismiss, submitting account'
+
+          [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](216 * $sf))
+
+          Start-Sleep -Milliseconds 600
+
+          [System.Windows.Forms.SendKeys]::SendWait('^a')
+
+          Start-Sleep -Milliseconds 200
+
+          [System.Windows.Forms.SendKeys]::SendWait($LoginUser)
+
+          Start-Sleep -Milliseconds 500
+
+          [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](271 * $sf))
+
+          Start-Sleep -Milliseconds 600
+
+          [System.Windows.Forms.SendKeys]::SendWait('^a')
+
+          Start-Sleep -Milliseconds 200
+
+          [System.Windows.Forms.SendKeys]::SendWait($LoginPass)
+
+          Start-Sleep -Milliseconds 500
+
+          [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](326 * $sf))
+
+          Start-Sleep -Milliseconds 3000
+
+          $script:LoginState = 'submitted'
+
+          $vgeo2 = Shot2 $loginShot $lgeo
+
+          if ($vgeo2) {
+
+            $vl2 = OcrImage $loginShot
+
+            foreach ($ln in $vl2) { L ('  login-vfy2| ' + $ln.Text) }
+
+            if (-not (Test-LoginTabPixel $loginShot $vgeo2 $sf)) { $script:LoginState = 'ok' }
+
+          }
+
+          L ('login state=' + $script:LoginState)
+
+        } else {
+
+          $script:LoginState = 'already'
+
+          L 'already logged in (pixel, after fallback)'
+
+        }
+
+      } else {
+
+        $script:LoginState = 'unknown'
+
+      }
 
     }
 
@@ -656,9 +825,9 @@ if ($LoginUser -and $LoginPass) {
 
     Start-Sleep -Milliseconds 1500
 
-    $geo = Shot $shotPath
+    $ng = Shot2 $shotPath $geo
 
-    if (-not $geo) { L 'WARN: shot failed after switching back to 被控' }
+    if ($ng) { $geo = $ng } else { L 'WARN: shot failed after switching back to 被控' }
 
   } catch { L ('login flow failed: ' + $_.Exception.Message); $script:LoginState = 'error' }
 
@@ -667,6 +836,22 @@ if ($LoginUser -and $LoginPass) {
 
 
 
+
+# ---------- 2.7 采集前强制回「被控」页 ----------
+
+# 教训（2026-10-27）：agent 重跑时应用可能停在 设备/主控 页，OCR 会把设备列表里
+# 别的设备码（如 441106985）误当成自己的。采集前无条件点一次「被控」tab。
+# 被 tab 600 基准 (65,560)。
+
+$tabScale = $geo.W / 600.0
+
+[BdWin]::Click($geo.L + [int](65 * $tabScale), $geo.T + [int](560 * $tabScale))
+
+Start-Sleep -Milliseconds 1500
+
+$ng = Shot2 $shotPath $geo
+
+if ($ng) { $geo = $ng } else { L 'WARN: shot failed after switching to 被控' }
 
 $lines = OcrImage $shotPath
 
@@ -897,9 +1082,15 @@ if ($devCode -and $devY -ge 0) {
     }
     L ('password(from ocr)=' + $ocrPwd)
     if ($FixedPassword) {
+      # OCR 常把小写 l 认成大写 I 或数字 1（2026-10-27 实测 lZfQZFjl -> IZfQZFjl）。
+      # 折叠 I/1->l 后一致即视为验证通过（密码含 0/O 混淆同理折叠）。
+      $fold = { param($s) $s -replace '[I1]', 'l' -replace 'O', '0' }
       if ($ocrPwd -eq $FixedPassword) {
         $password = $FixedPassword
         L 'fixed password verified'
+      } elseif ($ocrPwd -and (& $fold $ocrPwd) -eq (& $fold $FixedPassword)) {
+        $password = $FixedPassword
+        L 'fixed password verified (ocr I/1/O fold)'
       } elseif ($ocrPwd) {
         # 固定密码设置失败（输入被拒/提交失败）：OCR 读到的真实密码仍可用，如实上报
         $password = $ocrPwd
@@ -942,6 +1133,206 @@ if (-not $password -and $FixedPassword) {
 
 
 
+# ---------- 3.5 自动重绑账号（设备码每次开机都会变） ----------
+
+# 重大发现（2026-10-27）：BilldDesk 每次开机都是全新安装，设备身份重新生成，
+# 设备码会变（679640907 -> 024063379），旧绑定必然失效。所以每次开机在
+# 登录 + 固定密码之后，检查账号「设备」列表里有没有当前设备码，没有就自动
+# 「添加设备」绑一次（备注 cloud-desktop）。密码恒定 ⇒ 绑定立即在线。
+# 坐标 600 基准（v0.621 于 1024x768 实测）：设备 tab(299,560)、添加设备(229,62)、
+# 备注(344,278) 设备代码(344,333) 连接密码(344,388) 确定(300,443)。
+
+$script:BindState = ''
+
+if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' -and $script:LoginState -ne 'unknown') {
+
+  try {
+
+    Add-Type -AssemblyName System.Windows.Forms
+
+    $bindScale = $geo.W / 600.0
+
+    # 设备列表不显示设备码（只有 备注/主机名/IP/版本），所以绑定判定不能用码匹配，
+    # 改用主机名：本机条目 = 「cloud-desktop + $env:COMPUTERNAME」同行出现
+    # （2026-10-27 实测 OCR 能稳定读出 runnervmdaln5）。
+    $hostName = $env:COMPUTERNAME.ToLower()
+
+    # 打开「设备」页
+    [BdWin]::Click($geo.L + [int](299 * $bindScale), $geo.T + [int](560 * $bindScale))
+
+    Start-Sleep -Milliseconds 2000
+
+    $bindShot = Join-Path $OutDir 'shot-bind.png'
+
+    $bgeo = Shot2 $bindShot $geo
+
+    $already = $false
+
+    $staleRows = @()
+
+    if ($bgeo) {
+
+      $bl = OcrImage $bindShot
+
+      foreach ($ln in $bl) { L ('  bind-ocr| ' + $ln.Text) }
+
+      $allText = (($bl | ForEach-Object { $_.Text }) -join ' ').ToLower()
+
+      if ($allText.Contains($hostName) -and $allText.Contains('cloud-desktop')) {
+
+        $already = $true
+
+        L 'bind: current device already in account list (hostname match)'
+
+      } else {
+
+        # 收集历史失效的 cloud-desktop 条目（同行无本机主机名），先清掉再重绑，
+        # 避免每次开机堆一条死条目。行文本 y + 15 即该行「删除」按钮（600 基准 x=543）。
+        foreach ($ln in $bl) {
+
+          if ($ln.Text -match 'cloud-desktop' -and ($ln.Text.ToLower() -notmatch [regex]::Escape($hostName))) {
+
+            $staleRows += [double]$ln.Y
+
+          }
+
+        }
+
+      }
+
+    }
+
+    if (-not $bgeo) {
+
+      # 连截图都拿不到（窗口被遮挡/最小化）：不盲操作，如实上报
+      $script:BindState = 'no-shot'
+
+      L 'bind: skip, no shot available'
+
+    } else {
+
+      foreach ($ry in $staleRows) {
+
+        L ('bind: deleting stale cloud-desktop row at y=' + [int]$ry)
+
+        [BdWin]::Click($geo.L + [int](543 * $bindScale), $geo.T + [int](($ry + 15.0) * $bindScale))
+
+        Start-Sleep -Milliseconds 1500
+
+        # 确认删除对话框（600 基准）：确定 (368,351)
+        [BdWin]::Click($geo.L + [int](368 * $bindScale), $geo.T + [int](351 * $bindScale))
+
+        Start-Sleep -Milliseconds 2500
+
+      }
+
+      if ($already) {
+
+        $script:BindState = 'already'
+
+      } else {
+
+        # 清理后复查一次（可能清完才发现本机条目本来就在）
+        if ($staleRows.Count -gt 0) {
+
+          $bg2 = Shot2 $bindShot $geo
+
+          if ($bg2) {
+
+            $bl2 = OcrImage $bindShot
+
+            foreach ($ln in $bl2) { L ('  bind-ocr2| ' + $ln.Text) }
+
+            $allText2 = (($bl2 | ForEach-Object { $_.Text }) -join ' ').ToLower()
+
+            if ($allText2.Contains($hostName) -and $allText2.Contains('cloud-desktop')) { $already = $true }
+
+          }
+
+        }
+
+      }
+
+      if ($already) {
+
+        $script:BindState = 'already'
+
+        L 'bind: current device already in account list'
+
+      } else {
+
+        L 'bind: adding current device to account'
+
+        [BdWin]::Click($geo.L + [int](229 * $bindScale), $geo.T + [int](62 * $bindScale))
+
+        Start-Sleep -Milliseconds 1500
+
+        [BdWin]::Click($geo.L + [int](344 * $bindScale), $geo.T + [int](278 * $bindScale))
+
+        Start-Sleep -Milliseconds 500
+
+        [System.Windows.Forms.SendKeys]::SendWait('cloud-desktop')
+
+        Start-Sleep -Milliseconds 400
+
+        [BdWin]::Click($geo.L + [int](344 * $bindScale), $geo.T + [int](333 * $bindScale))
+
+        Start-Sleep -Milliseconds 500
+
+        [System.Windows.Forms.SendKeys]::SendWait($devCode)
+
+        Start-Sleep -Milliseconds 400
+
+        [BdWin]::Click($geo.L + [int](344 * $bindScale), $geo.T + [int](388 * $bindScale))
+
+        Start-Sleep -Milliseconds 500
+
+        [System.Windows.Forms.SendKeys]::SendWait($password)
+
+        Start-Sleep -Milliseconds 400
+
+        [BdWin]::Click($geo.L + [int](300 * $bindScale), $geo.T + [int](443 * $bindScale))
+
+        Start-Sleep -Milliseconds 3000
+
+        # 提交后验证：重新截「设备」页 OCR，看本机主机名是否出现
+        $vbindShot = Join-Path $OutDir 'shot-bind2.png'
+
+        $vbgeo = Shot2 $vbindShot $geo
+
+        $script:BindState = 'unverified'
+
+        if ($vbgeo) {
+
+          $vbl = OcrImage $vbindShot
+
+          foreach ($ln in $vbl) { L ('  bind-vfy| ' + $ln.Text) }
+
+          $allTextV = (($vbl | ForEach-Object { $_.Text }) -join ' ').ToLower()
+
+          if ($allTextV.Contains($hostName) -and $allTextV.Contains('cloud-desktop')) { $script:BindState = 'ok' }
+
+        }
+
+        L ('bind: verify state=' + $script:BindState)
+
+      }
+
+    }
+
+    # 回「被控」页
+    [BdWin]::Click($geo.L + [int](65 * $bindScale), $geo.T + [int](560 * $bindScale))
+
+    Start-Sleep -Milliseconds 1200
+
+  } catch { L ('bind flow failed: ' + $_.Exception.Message); $script:BindState = 'error' }
+
+} elseif ($devCode -and $password) {
+
+  $script:BindState = 'skip-no-login'
+
+}
+
 # ---------- 4. 落盘 ----------
 
 $result = [ordered]@{
@@ -960,7 +1351,9 @@ $result = [ordered]@{
 
   login     = if ($LoginUser) { if ($script:LoginState) { $script:LoginState } else { 'skipped' } } else { '' }
 
-  window    = ($geo.W.ToString() + 'x' + $geo.H.ToString())
+  bind      = if ($LoginUser) { if ($script:BindState) { $script:BindState } else { 'skipped' } } else { '' }
+
+  window    = if ($geo) { ($geo.W.ToString() + 'x' + $geo.H.ToString()) } else { '' }
 
   session   = $sess
 
