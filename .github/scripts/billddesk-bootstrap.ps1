@@ -185,12 +185,16 @@ if (Test-Path $agentSrc) {
 if (Test-Path $jsonPath) { Remove-Item $jsonPath -Force -ErrorAction SilentlyContinue }
 
 # ---------------- 4. 注册并运行交互会话任务 ----------------
+# 生成每次开机的随机 8 位连接密码（仅字母数字，SendKeys 安全）。
+# BilldDesk 默认密码是指纹派生值且会自动轮换，必须主动改掉才能保持状态文件里的值有效。
+$FixedPassword = -join ((1..8) | ForEach-Object { ((48..57) + (65..90) + (97..122)) | Get-Random })
+L ('fixed password generated (len=8)')
 $taskName = 'BilldDeskAgent'
 try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
 $fbPart = ''
 if ($FallbackPassword) { $fbPart = ' -FallbackPassword "' + $FallbackPassword + '"' }
 $actArg = '-NoProfile -ExecutionPolicy Bypass -File "' + $agentDst + '" -OutDir "' + $WorkDir +
-          '" -WaitWindowSec 90' + $fbPart
+          '" -WaitWindowSec 90 -FixedPassword "' + $FixedPassword + '"' + $fbPart
 $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $actArg
 $principal = New-ScheduledTaskPrincipal -UserId $AgentUser -LogonType Interactive -RunLevel Highest
 $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -218,7 +222,7 @@ if (-not $got) {
   # 兜底：用已知密码 + 让 agent 的下一次运行补设备码
   $got = [pscustomobject]@{
     ok = $false; state = 'agent-timeout'; device_code = ''; device_uuid = ''
-    password = $FallbackPassword; window = ''; session = 0; error = 'agent did not produce result in time'
+    password = $FixedPassword; window = ''; session = 0; error = 'agent did not produce result in time'
   }
   L 'agent timeout'
 }
