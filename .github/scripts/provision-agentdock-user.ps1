@@ -167,7 +167,7 @@ try {
     try {
         $guiBundle = 'C:\agentdock-install\gui-ops-bundle'
         if (Test-Path -LiteralPath $guiBundle) {
-            $adExe = @(Get-ChildItem "$env:LOCALAPPDATA\AgentDock\versions" -Recurse -Filter 'agentdock.exe' -ErrorAction SilentlyContinue |
+            $adExe = @(Get-ChildItem "$env:LOCALAPPDATA\AgentDock" -Recurse -Filter 'agentdock.exe' -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1)
             if ($adExe.Count -gt 0) {
                 $sk = (& $adExe[0].FullName skill bootstrap --bundle $guiBundle 2>&1 | Out-String).Trim()
