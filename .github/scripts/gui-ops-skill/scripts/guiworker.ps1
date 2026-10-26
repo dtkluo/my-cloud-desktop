@@ -99,18 +99,24 @@ $KF_KEYUP     = 0x0002
 $KF_UNICODE   = 0x0004
 
 function Send-Mouse([uint32] $flags, [int] $dx, [int] $dy, [int] $wheel) {
+    # NOTE: build the nested struct on a LOCAL variable first, then assign it whole.
+    # "$inp.mi.dx = x" mutates a boxed COPY and is silently lost (PS value-type trap).
+    $mi = New-Object GuiNative+MOUSEINPUT
+    $mi.dx = $dx
+    $mi.dy = $dy
+    if ($wheel -lt 0) {
+        $mi.mouseData = [uint32]($wheel -band 0xFFFFFFFF)
+    } else {
+        $mi.mouseData = [uint32]$wheel
+    }
+    $mi.dwFlags = $flags
+    $mi.time = 0
     $inp = New-Object GuiNative+MINPUT
     $inp.type = 0
-    $inp.mi.dx = $dx
-    $inp.mi.dy = $dy
-    if ($wheel -lt 0) {
-        $inp.mi.mouseData = [uint32]($wheel -band 0xFFFFFFFF)
-    } else {
-        $inp.mi.mouseData = [uint32]$wheel
-    }
-    $inp.mi.dwFlags = $flags
+    $inp.mi = $mi
     $cb = [System.Runtime.InteropServices.Marshal]::SizeOf([type][GuiNative+MINPUT])
-    [void][GuiNative]::SendInput(1, @($inp), $cb)
+    $sent = [GuiNative]::SendInput(1, @($inp), $cb)
+    return $sent
 }
 
 function Move-MouseAbs([int] $x, [int] $y) {
@@ -118,25 +124,28 @@ function Move-MouseAbs([int] $x, [int] $y) {
     $w = [Math]::Max(1, $vs.w); $h = [Math]::Max(1, $vs.h)
     $nx = [int]((($x - $vs.x) * 65535.0) / $w)
     $ny = [int]((($y - $vs.y) * 65535.0) / $h)
-    Send-Mouse ([uint32]($MF_MOVE -bor $MF_ABSOLUTE -bor $MF_VIRTUALDESK)) $nx $ny 0
+    $sent = Send-Mouse ([uint32]($MF_MOVE -bor $MF_ABSOLUTE -bor $MF_VIRTUALDESK)) $nx $ny 0
     [void][GuiNative]::SetCursorPos($x, $y)
+    return $sent
 }
 
 function Send-Click([int] $x, [int] $y, [string] $button, [bool] $isDouble) {
-    Move-MouseAbs $x $y
+    $total = 0
+    $total += [int](Move-MouseAbs $x $y)
     Start-Sleep -Milliseconds 60
     $down = $MF_LEFTDOWN; $up = $MF_LEFTUP
     if ($button -eq 'right') { $down = $MF_RIGHTDOWN; $up = $MF_RIGHTUP }
     elseif ($button -eq 'middle') { $down = $MF_MIDDLEDOWN; $up = $MF_MIDDLEUP }
-    Send-Mouse ([uint32]$down) 0 0 0
+    $total += [int](Send-Mouse ([uint32]$down) 0 0 0)
     Start-Sleep -Milliseconds 40
-    Send-Mouse ([uint32]$up) 0 0 0
+    $total += [int](Send-Mouse ([uint32]$up) 0 0 0)
     if ($isDouble) {
         Start-Sleep -Milliseconds 90
-        Send-Mouse ([uint32]$down) 0 0 0
+        $total += [int](Send-Mouse ([uint32]$down) 0 0 0)
         Start-Sleep -Milliseconds 40
-        Send-Mouse ([uint32]$up) 0 0 0
+        $total += [int](Send-Mouse ([uint32]$up) 0 0 0)
     }
+    return $total
 }
 
 $script:VkMap = @{
@@ -163,40 +172,54 @@ function Send-KeyCombo([string] $combo) {
     $cb = [System.Runtime.InteropServices.Marshal]::SizeOf([type][GuiNative+KINPUT])
     $inputs = New-Object 'System.Collections.Generic.List[GuiNative+KINPUT]'
     foreach ($vk in $vks) {
+        $ki = New-Object GuiNative+KEYBDINPUT
+        $ki.wVk = [uint16]$vk; $ki.wScan = 0; $ki.dwFlags = 0; $ki.time = 0; $ki.dwExtraInfo = [IntPtr]::Zero
         $inp = New-Object GuiNative+KINPUT
-        $inp.type = 1; $inp.ki.wVk = [uint16]$vk; $inp.ki.dwFlags = 0; $inp.pad = 0
+        $inp.type = 1; $inp.ki = $ki; $inp.pad = 0
         $inputs.Add($inp)
     }
     for ($i = $vks.Count - 1; $i -ge 0; $i--) {
+        $ki = New-Object GuiNative+KEYBDINPUT
+        $ki.wVk = [uint16]$vks[$i]; $ki.wScan = 0; $ki.dwFlags = [uint32]$KF_KEYUP; $ki.time = 0; $ki.dwExtraInfo = [IntPtr]::Zero
         $inp = New-Object GuiNative+KINPUT
-        $inp.type = 1; $inp.ki.wVk = [uint16]$vks[$i]; $inp.ki.dwFlags = [uint32]$KF_KEYUP; $inp.pad = 0
+        $inp.type = 1; $inp.ki = $ki; $inp.pad = 0
         $inputs.Add($inp)
     }
-    [void][GuiNative]::SendInput([uint32]$inputs.Count, $inputs.ToArray(), $cb)
+    return [GuiNative]::SendInput([uint32]$inputs.Count, $inputs.ToArray(), $cb)
 }
 
 function Send-Text([string] $text) {
     $cb = [System.Runtime.InteropServices.Marshal]::SizeOf([type][GuiNative+KINPUT])
     $chars = $text.ToCharArray()
+    $sentTotal = 0
     foreach ($ch in $chars) {
         if ($ch -eq "`n") {
+            $ki = New-Object GuiNative+KEYBDINPUT
+            $ki.wVk = 0x0D; $ki.wScan = 0; $ki.dwFlags = 0; $ki.time = 0; $ki.dwExtraInfo = [IntPtr]::Zero
             $inp = New-Object GuiNative+KINPUT
-            $inp.type = 1; $inp.ki.wVk = 0x0D; $inp.ki.dwFlags = 0; $inp.pad = 0
-            [void][GuiNative]::SendInput(1, @($inp), $cb)
+            $inp.type = 1; $inp.ki = $ki; $inp.pad = 0
+            $sentTotal += [int][GuiNative]::SendInput(1, @($inp), $cb)
+            $ki2 = New-Object GuiNative+KEYBDINPUT
+            $ki2.wVk = 0x0D; $ki2.wScan = 0; $ki2.dwFlags = [uint32]$KF_KEYUP; $ki2.time = 0; $ki2.dwExtraInfo = [IntPtr]::Zero
             $inp2 = New-Object GuiNative+KINPUT
-            $inp2.type = 1; $inp2.ki.wVk = 0x0D; $inp2.ki.dwFlags = [uint32]$KF_KEYUP; $inp2.pad = 0
-            [void][GuiNative]::SendInput(1, @($inp2), $cb)
+            $inp2.type = 1; $inp2.ki = $ki2; $inp2.pad = 0
+            $sentTotal += [int][GuiNative]::SendInput(1, @($inp2), $cb)
             continue
         }
         $code = [int]$ch
+        $ki = New-Object GuiNative+KEYBDINPUT
+        $ki.wVk = 0; $ki.wScan = [uint16]$code; $ki.dwFlags = [uint32]$KF_UNICODE; $ki.time = 0; $ki.dwExtraInfo = [IntPtr]::Zero
         $inp = New-Object GuiNative+KINPUT
-        $inp.type = 1; $inp.ki.wScan = [uint16]$code; $inp.ki.dwFlags = [uint32]$KF_UNICODE; $inp.pad = 0
-        [void][GuiNative]::SendInput(1, @($inp), $cb)
+        $inp.type = 1; $inp.ki = $ki; $inp.pad = 0
+        $sentTotal += [int][GuiNative]::SendInput(1, @($inp), $cb)
+        $ki2 = New-Object GuiNative+KEYBDINPUT
+        $ki2.wVk = 0; $ki2.wScan = [uint16]$code; $ki2.dwFlags = [uint32]($KF_UNICODE -bor $KF_KEYUP); $ki2.time = 0; $ki2.dwExtraInfo = [IntPtr]::Zero
         $inp2 = New-Object GuiNative+KINPUT
-        $inp2.type = 1; $inp2.ki.wScan = [uint16]$code; $inp2.ki.dwFlags = [uint32]($KF_UNICODE -bor $KF_KEYUP); $inp2.pad = 0
-        [void][GuiNative]::SendInput(1, @($inp2), $cb)
+        $inp2.type = 1; $inp2.ki = $ki2; $inp2.pad = 0
+        $sentTotal += [int][GuiNative]::SendInput(1, @($inp2), $cb)
         Start-Sleep -Milliseconds 6
     }
+    return $sentTotal
 }
 
 function Get-WindowInfo([IntPtr] $hWnd) {
@@ -270,7 +293,7 @@ function Invoke-Command([hashtable] $cmd) {
             $res.height = $info.height
         }
         'click' {
-            Send-Click ([int]$cmd['x']) ([int]$cmd['y']) ([string]$cmd['button']) ([bool]$cmd['double'])
+            $res.sent = Send-Click ([int]$cmd['x']) ([int]$cmd['y']) ([string]$cmd['button']) ([bool]$cmd['double'])
             $res.ok = $true
         }
         'move' {
@@ -288,7 +311,7 @@ function Invoke-Command([hashtable] $cmd) {
             $res.ok = $true
         }
         'key' {
-            Send-KeyCombo ([string]$cmd['keys'])
+            $res.sent = Send-KeyCombo ([string]$cmd['keys'])
             $res.ok = $true
         }
         'window' {
