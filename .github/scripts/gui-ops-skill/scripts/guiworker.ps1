@@ -262,6 +262,39 @@ function Find-Window([string] $title) {
     return $script:foundHwnd
 }
 
+# ---- UIA (read-only): enumerate controls of a top-level window ----
+function Get-UiaWindow([string] $target) {
+    Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName UIAutomationTypes -ErrorAction SilentlyContinue
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $t = $target.Trim()
+    if ($t -match '^\d+$') {
+        try {
+            $win = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$t)
+            if ($win) { return $win }
+        } catch { }
+    }
+    # exact class name match on top-level windows
+    $condClass = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, $t)
+    $byClass = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $condClass)
+    if ($byClass) { return $byClass }
+    # title contains match on top-level windows
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+    $tl = $t.ToLower()
+    foreach ($w in $all) {
+        $n = ''
+        try { $n = $w.Current.Name } catch { }
+        if ($n -and $n.ToLower().Contains($tl)) { return $w }
+    }
+    return $null
+}
+
+function Get-UiaRect($el) {
+    $r = $el.Current.BoundingRectangle
+    if ($r.IsEmpty) { return @{ x = -1; y = -1; w = 0; h = 0 } }
+    return @{ x = [int]$r.X; y = [int]$r.Y; w = [int]$r.Width; h = [int]$r.Height }
+}
+
 function Do-Screenshot([string] $pngPath) {
     $vs = Get-VirtualScreen
     $bmp = New-Object System.Drawing.Bitmap $vs.w, $vs.h
@@ -352,6 +385,52 @@ function Invoke-Command([hashtable] $cmd) {
             } else {
                 $res.error = 'unknown-window-action'
             }
+        }
+        'uia' {
+            # read-only UIA tree: target = hwnd number | exact class name | title substring
+            $target = [string]$cmd['target']
+            if ($target -eq '') { $res.error = 'bad-args'; break }
+            $maxN = [int]$cmd['max']
+            if ($maxN -le 0 -or $maxN -gt 300) { $maxN = 60 }
+            $findName = ''
+            if ($cmd.ContainsKey('find')) { $findName = [string]$cmd['find'] }
+            $win = Get-UiaWindow $target
+            if (-not $win) { $res.error = 'window-not-found'; break }
+            $wcur = $win.Current
+            $res.ok = $true
+            $res.window = @{ name = $wcur.Name; class = $wcur.ClassName; pid = $wcur.ProcessId }
+            $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            $res.total = $all.Count
+            $items = New-Object System.Collections.Generic.List[object]
+            $findHits = New-Object System.Collections.Generic.List[object]
+            $findL = $findName.ToLower()
+            $i = 0
+            foreach ($c in $all) {
+                $ci = $c.Current
+                $ctype = ''
+                try { $ctype = $ci.ControlType.ProgrammaticName.Replace('ControlType.', '') } catch { }
+                $val = ''
+                try { $val = $c.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { }
+                if ($items.Count -lt $maxN) {
+                    $items.Add(@{
+                        i = $i
+                        type = $ctype
+                        name = $ci.Name
+                        value = $val
+                        rect = (Get-UiaRect $c)
+                        enabled = $ci.IsEnabled
+                    })
+                }
+                if ($findName -ne '' -and $ci.Name -and $ci.Name.ToLower().Contains($findL) -and $findHits.Count -lt 10) {
+                    $rct = $ci.BoundingRectangle
+                    $cx = -1; $cy = -1
+                    if (-not $rct.IsEmpty) { $cx = [int]($rct.X + $rct.Width / 2); $cy = [int]($rct.Y + $rct.Height / 2) }
+                    $findHits.Add(@{ name = $ci.Name; type = $ctype; center = @{ x = $cx; y = $cy } })
+                }
+                $i++
+            }
+            $res.controls = $items
+            if ($findName -ne '') { $res.find = $findHits }
         }
         'sleep' {
             $ms = [int]$cmd['ms']
