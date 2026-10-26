@@ -98,7 +98,7 @@ if ($cur.obj.PSObject.Properties.Name -contains 'piik' -and $cur.obj.piik) {
 }
 
 $body = @{
-    message = ('billddesk: ' + $state + ' code=' + $node.device_code)
+    message = ('billddesk: ' + $state + ' code=' + $node.device_code + ' [skip ci]')
     content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($cur.obj | ConvertTo-Json -Depth 12)))
     sha     = $cur.sha
     branch  = 'main'
