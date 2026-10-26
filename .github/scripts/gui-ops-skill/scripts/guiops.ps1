@@ -15,6 +15,9 @@ param(
     [switch] $Double,
     [int] $Delta = -120,
     [string] $Action = '',
+    [string] $Target = '',
+    [string] $Find = '',
+    [int] $Max = 60,
     [int] $Ms = 0,
     [string] $Echo = '',
     [string] $Out = '',
@@ -92,9 +95,15 @@ switch ($Op) {
             $cmd['title'] = $Title
         }
     }
+    'uia' {
+        if ($Target -eq '') { Fail 'bad-args' 'uia requires -Target (hwnd | exact class name | title substring)' '' }
+        $cmd['target'] = $Target
+        $cmd['find'] = $Find
+        $cmd['max'] = $Max
+    }
     'sleep' { $cmd['ms'] = $Ms }
     'ping'  { $cmd['echo'] = $Echo }
-    default { Fail 'bad-op' ('unknown op: ' + $Op) 'valid: screenshot|click|move|scroll|type|key|window|sleep|ping' }
+    default { Fail 'bad-op' ('unknown op: ' + $Op) 'valid: screenshot|click|move|scroll|type|key|window|uia|sleep|ping' }
 }
 
 # ---- submit (write tmp then atomic move so worker never sees a partial file) ----
