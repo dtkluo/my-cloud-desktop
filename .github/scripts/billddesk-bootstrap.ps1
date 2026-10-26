@@ -187,7 +187,7 @@ if (Test-Path $jsonPath) { Remove-Item $jsonPath -Force -ErrorAction SilentlyCon
 # ---------------- 4. 注册并运行交互会话任务 ----------------
 # 生成每次开机的随机 8 位连接密码（仅字母数字，SendKeys 安全）。
 # BilldDesk 默认密码是指纹派生值且会自动轮换，必须主动改掉才能保持状态文件里的值有效。
-$FixedPassword = -join ((1..8) | ForEach-Object { ((48..57) + (65..90) + (97..122)) | Get-Random })
+$FixedPassword = -join ((1..8) | ForEach-Object { [char](((48..57) + (65..90) + (97..122)) | Get-Random) })
 L ('fixed password generated (len=8)')
 $taskName = 'BilldDeskAgent'
 try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
