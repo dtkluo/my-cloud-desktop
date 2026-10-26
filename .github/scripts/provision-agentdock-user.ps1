@@ -161,6 +161,27 @@ try {
     }
     L "healthz_after=$ok"
 
+    # ---- gui-ops skill bootstrap (best effort; must never break provisioning) ----
+    # The mini bundle is built by install-guiops.ps1 (workflow step). The skill state
+    # dir lives under THIS user's profile, so the bootstrap must run here (rdpadmin).
+    try {
+        $guiBundle = 'C:\agentdock-install\gui-ops-bundle'
+        if (Test-Path -LiteralPath $guiBundle) {
+            $adExe = @(Get-ChildItem "$env:LOCALAPPDATA\AgentDock\versions" -Recurse -Filter 'agentdock.exe' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+            if ($adExe.Count -gt 0) {
+                $sk = (& $adExe[0].FullName skill bootstrap --bundle $guiBundle 2>&1 | Out-String).Trim()
+                L ("guiops_bootstrap=" + ($sk -replace "`r?`n", ' | '))
+            } else {
+                L 'guiops_bootstrap=exe-not-found'
+            }
+        } else {
+            L 'guiops_bootstrap=bundle-missing'
+        }
+    } catch {
+        L ("guiops_bootstrap_error=" + $_.Exception.Message)
+    }
+
     # ---- wait for the tunnel to register ----
     # Evidence, in order of reliability:
     #   1) cloudflared's own log ("Registered tunnel connection", 4 lines on a healthy
