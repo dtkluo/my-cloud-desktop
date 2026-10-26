@@ -382,7 +382,7 @@ if ($OnlyIfChanged -and $null -ne $remoteJson) {
 # ---------- 写入远端 ----------
 $json = $payload | ConvertTo-Json -Depth 8
 $body = [ordered]@{
-    message = "chore(state): 更新云桌面连接信息（run $runNumber）"
+    message = "chore(state): 更新云桌面连接信息（run $runNumber） [skip ci]"
     content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
     branch  = 'main'
 }
