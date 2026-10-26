@@ -230,7 +230,7 @@ if (-not $got) {
   # 兜底：用已知密码 + 让 agent 的下一次运行补设备码
   $got = [pscustomobject]@{
     ok = $false; state = 'agent-timeout'; device_code = ''; device_uuid = ''
-    password = $FixedPassword; window = ''; session = 0; error = 'agent did not produce result in time'
+    password = $FixedPassword; window = ''; session = 0; account = $AccountUser; login = ''; bind = ''; error = 'agent did not produce result in time'
   }
   L 'agent timeout'
 }
@@ -249,6 +249,7 @@ $out = [ordered]@{
   password    = [string]$got.password
   account     = [string]$got.account
   login       = [string]$got.login
+  bind        = [string]$got.bind
   window      = [string]$got.window
   session     = [int]$got.session
   install_dir = $installDir
