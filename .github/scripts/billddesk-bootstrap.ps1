@@ -16,7 +16,14 @@ param(
   [string]$WorkDir = 'C:\billddesk-auto',
   [string]$AgentUser = 'runneradmin',
   [int]$AgentTimeoutSec = 180,
-  [string]$FallbackPassword = 'r9R479JO'
+  [string]$FallbackPassword = 'r9R479JO',
+  # 连接密码必须恒定：dtka1 账号下的「设备绑定」是按 设备码+密码 在服务端校验的，
+  # 每次开机换密码会让绑定变成「失效」（2026-10-27 实测）。固定后开机 agent 会幂等地
+  # 重设成同一值，服务端绑定始终有效，手机主控端可同账号直连。
+  [string]$ConnectPassword = 'lZfQZFjl',
+  # 主控端自动登录账号（同账号直连用）
+  [string]$AccountUser = 'dtka1',
+  [string]$AccountPass = 'ljs8682268'
 )
 
 $ErrorActionPreference = 'Continue'
@@ -185,16 +192,17 @@ if (Test-Path $agentSrc) {
 if (Test-Path $jsonPath) { Remove-Item $jsonPath -Force -ErrorAction SilentlyContinue }
 
 # ---------------- 4. 注册并运行交互会话任务 ----------------
-# 生成每次开机的随机 8 位连接密码（仅字母数字，SendKeys 安全）。
-# BilldDesk 默认密码是指纹派生值且会自动轮换，必须主动改掉才能保持状态文件里的值有效。
-$FixedPassword = -join ((1..8) | ForEach-Object { [char](((48..57) + (65..90) + (97..122)) | Get-Random) })
-L ('fixed password generated (len=8)')
+# 连接密码用恒定值（见 param 注释），agent 会幂等地重设，不再随机生成。
+$FixedPassword = $ConnectPassword
+L ('fixed password (constant) len=' + $FixedPassword.Length)
 $taskName = 'BilldDeskAgent'
 try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
 $fbPart = ''
 if ($FallbackPassword) { $fbPart = ' -FallbackPassword "' + $FallbackPassword + '"' }
+$loginPart = ''
+if ($AccountUser -and $AccountPass) { $loginPart = ' -LoginUser "' + $AccountUser + '" -LoginPass "' + $AccountPass + '"' }
 $actArg = '-NoProfile -ExecutionPolicy Bypass -File "' + $agentDst + '" -OutDir "' + $WorkDir +
-          '" -WaitWindowSec 90 -FixedPassword "' + $FixedPassword + '"' + $fbPart
+          '" -WaitWindowSec 90 -FixedPassword "' + $FixedPassword + '"' + $fbPart + $loginPart
 $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $actArg
 $principal = New-ScheduledTaskPrincipal -UserId $AgentUser -LogonType Interactive -RunLevel Highest
 $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -239,6 +247,8 @@ $out = [ordered]@{
   device_code = [string]$got.device_code
   device_uuid = [string]$got.device_uuid
   password    = [string]$got.password
+  account     = [string]$got.account
+  login       = [string]$got.login
   window      = [string]$got.window
   session     = [int]$got.session
   install_dir = $installDir
