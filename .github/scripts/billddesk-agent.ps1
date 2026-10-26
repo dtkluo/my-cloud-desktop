@@ -12,7 +12,8 @@
 param(
   [string]$OutDir = 'C:\billddesk-auto',
   [int]$WaitWindowSec = 90,
-  [string]$FallbackPassword = ''
+  [string]$FallbackPassword = '',
+  [string]$FixedPassword = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -276,6 +277,31 @@ if (-not $devCode) {
 }
 L ("devCode=" + $devCode + " devY=" + $devY)
 
+# ---------- 2.5 固定连接密码（-FixedPassword 传入时执行） ----------
+# 背景：BilldDesk 的默认密码是机器指纹派生的固定值（GitHub runner 镜像 MachineGuid
+# 相同 ⇒ 每台新 VM 都是同一个初始密码），且开机约 15-25 分钟后会自动轮换成随机值，
+# 导致状态文件里推的密码很快失效（2026-10-26 实测）。对策：开机就用「铅笔」对话框
+# 把密码改成 bootstrap 生成的随机 8 位，此后不再轮换，状态文件里的值始终有效。
+if ($FixedPassword -and $devCode) {
+  Add-Type -AssemblyName System.Windows.Forms
+  $scaleF = $geo.H / 600.0
+  L ('set fixed password len=' + $FixedPassword.Length)
+  # 铅笔图标：与眼睛同行（devY+105 中心），x≈545（600 基准）
+  [BdWin]::Click($geo.L + [int](545 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
+  Start-Sleep -Milliseconds 1800
+  # 新密码输入框（对话框内固定位置）
+  [BdWin]::Click($geo.L + [int](338 * $scaleF), $geo.T + [int](360 * $scaleF))
+  Start-Sleep -Milliseconds 700
+  [System.Windows.Forms.SendKeys]::SendWait('^a')
+  Start-Sleep -Milliseconds 250
+  [System.Windows.Forms.SendKeys]::SendWait($FixedPassword)
+  Start-Sleep -Milliseconds 600
+  # 确定按钮
+  [BdWin]::Click($geo.L + [int](307 * $scaleF), $geo.T + [int](415 * $scaleF))
+  Start-Sleep -Milliseconds 2500
+  L 'fixed password submitted'
+}
+
 # ---------- 3. 像素定位眼睛图标并点击 ----------
 $password = ''
 if ($devCode -and $devY -ge 0) {
@@ -354,6 +380,8 @@ if ($devCode -and $devY -ge 0) {
       }
     }
     L ('password(from ocr)=' + $password)
+    # 密码是我们自己设置的，以传入值为准（OCR 仅作 UI 确认）
+    if ($FixedPassword) { $password = $FixedPassword }
     # 点回去重新掩码
     [BdWin]::Click($ex, $ey)
     Start-Sleep -Milliseconds 400
