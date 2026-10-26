@@ -388,7 +388,11 @@ if ($devCode -and $devY -ge 0) {
   }
 }
 
-if (-not $password -and $FallbackPassword) {
+if (-not $password -and $FixedPassword) {
+  # 我们自己设置的密码就是权威值（OCR 偶尔读不到密码行，不能退回旧默认值）
+  $password = $FixedPassword
+  L ('password fallback=fixed')
+} elseif (-not $password -and $FallbackPassword) {
   $password = $FallbackPassword
   L ('password fallback=' + $password)
 }
