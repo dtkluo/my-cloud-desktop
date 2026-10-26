@@ -251,6 +251,23 @@ jobs:
             -Port 8765
 
       # ======================================================================
+      # [v9.4 新增] gui-ops skill + 交互会话 worker：
+      #   1) 把 .github/scripts/gui-ops-skill 打成 mini bundle 放到
+      #      C:\agentdock-install\gui-ops-bundle（随后 provision 在 rdpadmin
+      #      账户内跑 `agentdock skill bootstrap` 安装激活）；
+      #   2) 部署 C:\ProgramData\gui-ops 运行时并注册/启动计划任务
+      #      AgentDock-GuiOpsWorker（Interactive => 本会话 2，SendInput 通道）。
+      #   失败不影响主流程（continue-on-error）。
+      # ======================================================================
+      - name: 5.2 部署 gui-ops skill 与 GUI worker
+        if: ${{ github.event.inputs.agentdock != 'disabled' }}
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/install-guiops.ps1
+          Write-Host "install-guiops.ps1 exit=$LASTEXITCODE"
+
+      # ======================================================================
       # [v9.2 新增] 自动建立 rdpadmin 的交互式会话 —— 去掉「人工 RDP 一下」这一步。
       #
       #   为什么需要：AgentDock 是**按用户安装**的，安装器注册了计划任务
