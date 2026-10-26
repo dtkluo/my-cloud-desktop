@@ -1,7 +1,7 @@
 ---
 name: gui-ops
-description: 云桌面/Windows 主机 GUI 自动化（截图、鼠标点击、键盘输入、窗口管理）。适用于需要操作交互桌面上的原生窗口（如 BilldDesk、安装向导、任意 GUI 程序）的场景。通过常驻 worker（计划任务跑在交互会话）+ 文件队列通信，任何会话里的 agent 都能用 SendInput 真实注入键鼠、用 GDI 截图。与 file-relay 搭配可把截图传回外部查看。
-version: 1.0.0
+description: 云桌面/Windows 主机 GUI 自动化（截图、鼠标点击、键盘输入、窗口管理、UIA 控件树读取）。适用于需要操作交互桌面上的原生窗口（如 BilldDesk、安装向导、任意 GUI 程序）的场景。通过常驻 worker（计划任务跑在交互会话）+ 文件队列通信，任何会话里的 agent 都能用 SendInput 真实注入键鼠、用 GDI 截图、用 UI Automation 结构化读取原生窗口控件（对 Flutter/自绘窗口无效，这类窗口请用截图+视觉）。与 file-relay 搭配可把截图传回外部查看。
+version: 1.1.0
 ---
 
 # gui-ops — Windows 交互桌面 GUI 自动化
@@ -38,6 +38,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op type -Text 
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op key -Keys ctrl+shift+esc
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op window -Action list
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op window -Action activate -Title "BilldDesk"
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op uia -Target "Shell_TrayWnd"
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op uia -Target "记事本" -Find "保存"   # 返回"保存"按钮中心坐标
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op scroll -X 960 -Y 540 -Delta -240
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op ping -Echo hi
 ```
@@ -55,6 +57,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op ping -Echo 
 | type | -Text | Unicode 逐字符注入，`\n` 映射为回车 |
 | key | -Keys | 组合键，`+` 分隔：ctrl/alt/shift/win/enter/tab/esc/f1-f12/字母/数字 |
 | window | -Action list / activate -Title / foreground | 列出可见窗口 / 前置窗口 / 查询前台 |
+| uia | -Target [-Find 名字子串] [-Max N] | 只读枚举窗口 UIA 控件树（type/name/value/rect/enabled）。Target = hwnd 数字 \| 精确类名 \| 标题子串。带 -Find 时返回匹配控件中心坐标（可直接喂给 click）。对原生 Win32/WPF/Qt 窗口有效；Flutter/自绘窗口（如 BilldDesk）不暴露语义树，请改用 screenshot+视觉 |
 | sleep | -Ms | worker 侧等待（配合连续动作） |
 | ping | -Echo | 存活探测 |
 
@@ -74,6 +77,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/guiops.ps1 -Op ping -Echo 
 - `queue-missing`：未安装（安装方未执行 install-guiops.ps1）。
 - `timeout`：worker 超时未回结果（看 worker.log）。
 - `bad-op` / `bad-args` / `bad-json`：调用侧问题。
+- `window-not-found`（uia）：Target 没匹配到顶层窗口（窗口未开/已托盘化/类名拼错）。
 
 ## 环境变量
 
