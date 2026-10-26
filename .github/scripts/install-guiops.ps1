@@ -24,8 +24,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $summary = @{ ok = $false; bundle = ''; task = $WorkerTask; worker_alive = $false; message = '' }
+$diagLog = 'C:\agentdock-install\gui-ops-install.log'
 
-function Say([string] $m) { Write-Host ("[gui-ops] " + $m) }
+function Say([string] $m) {
+    Write-Host ("[gui-ops] " + $m)
+    try {
+        if (-not (Test-Path -LiteralPath 'C:\agentdock-install')) { New-Item -ItemType Directory -Path 'C:\agentdock-install' -Force | Out-Null }
+        Add-Content -LiteralPath $diagLog -Encoding ascii -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $m)
+    } catch { }
+}
 
 try {
     # ---------- 1. build the mini bundle ----------
@@ -77,18 +84,22 @@ try {
     Say ('runtime ready: ' + $RuntimeRoot)
 
     # ---------- 3. scheduled task (current user, Interactive => own desktop session) ----------
+    # NOTE: no logon trigger on purpose - every boot is a fresh VM whose workflow
+    # re-runs this script and starts the task immediately (same pattern as
+    # billddesk-bootstrap, which is proven to work in this context).
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $action = New-ScheduledTaskAction -Execute $psExe `
         -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $RuntimeRoot 'guiworker.ps1') + '"')
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -UserId $env:USERNAME
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
-    Register-ScheduledTask -TaskName $WorkerTask -Action $action -Trigger $trigger `
-        -Settings $settings -Principal $principal -Force | Out-Null
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+    Say ('registering task user=' + $env:USERNAME + ' exe=' + $psExe)
+    Register-ScheduledTask -TaskName $WorkerTask -Action $action `
+        -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
+    Say 'task registered'
     Start-ScheduledTask -TaskName $WorkerTask
-    Say ('task registered+started: ' + $WorkerTask)
+    Say ('task started: ' + $WorkerTask)
 
     # ---------- 4. wait for heartbeat ----------
     $statusFile = Join-Path $RuntimeRoot 'status.json'
@@ -111,7 +122,7 @@ try {
     }
 } catch {
     $summary.message = 'exception: ' + $_.Exception.Message
-    Say $summary.message
+    Say ('EXCEPTION at line ' + $_.InvocationInfo.ScriptLineNumber + ': ' + $_.Exception.ToString())
 }
 
 $summary | ConvertTo-Json -Depth 4 -Compress | Write-Host
