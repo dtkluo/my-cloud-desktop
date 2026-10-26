@@ -12,7 +12,7 @@
         否则 BilldDesk 采不到系统声音。
 #>
 param(
-  [string]$InstallerUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/billddesk-lab/BilldDesk_v0.620.0.exe',
+  [string]$InstallerUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/billddesk-lab/BilldDesk_v0.621.0.exe',
   [string]$WorkDir = 'C:\billddesk-auto',
   [string]$AgentUser = 'runneradmin',
   [int]$AgentTimeoutSec = 180,
