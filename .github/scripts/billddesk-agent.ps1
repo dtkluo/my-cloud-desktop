@@ -428,6 +428,12 @@ function Test-LoginTabPixel([string]$imgPath, $ggeo, [double]$sc) {
 
 # ---------- 1. 等窗口 ----------
 
+# Edge 欢迎弹窗防护（2026-10-27 晚实测）：这台 VM 每次开机 Edge 都会弹欢迎页抢焦点，
+# 盖在 BilldDesk 上 ⇒ Shot 按 rect 抓屏抓到的是 Edge 内容，OCR 全是广告文案，
+# 眼睛/铅笔/绑定点击全部落在 Edge 上静默空转（固定密码没设、绑定没提交，
+# 用户端表现为「密码错误」）。开机先杀 Edge，一劳永逸。
+try { Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue } catch { }
+
 $deadline = (Get-Date).AddSeconds($WaitWindowSec)
 
 $found = $false
@@ -694,6 +700,44 @@ if ($LoginUser -and $LoginPass) {
       # 像素判定登录态（中文 OCR 不可用，见 Test-LoginTabPixel 注释）
       $needLogin = Test-LoginTabPixel $loginShot $lgeo $sf
 
+      # 遮挡/切页失败防护（2026-10-27 晚实测）：点主控 tab 若落在遮挡物上，
+      # 截图其实还是被控页——被控页同样没有黄色 tab，会被误判「已登录」。
+      # 被控页独有特征 = 9 位设备码（3x3 分组或纯 9 位数字）；检测到就视为
+      # 「判定无效」，Focus 后重试点主控再判一轮。
+      $ctrlPageSeen = $false
+
+      foreach ($ln in $ll) {
+
+        if ($ln.Text -match '(\d{3})\s*(\d{3})\s*(\d{3})') { $ctrlPageSeen = $true; break }
+
+      }
+
+      if (-not $needLogin -and $ctrlPageSeen) {
+
+        L 'WARN: still on 被控 page (main-control click lost?), re-focusing and retrying'
+
+        [BdWin]::Focus()
+
+        Start-Sleep -Milliseconds 1000
+
+        [BdWin]::Click($ofx + [int](185 * $sf), $ofy + [int](560 * $sf))
+
+        Start-Sleep -Milliseconds 1500
+
+        $lgeo = Shot2 $loginShot $lgeo
+
+        if ($lgeo) {
+
+          $ll = OcrImage $loginShot
+
+          foreach ($ln in $ll) { L ('  login-ocr-retry| ' + $ln.Text) }
+
+          $needLogin = Test-LoginTabPixel $loginShot $lgeo $sf
+
+        }
+
+      }
+
       $loggedIn = (-not $needLogin)
 
       if ($needLogin) { L 'login page detected (yellow tab pixel)' }
@@ -708,7 +752,7 @@ if ($LoginUser -and $LoginPass) {
 
       Start-Sleep -Milliseconds 600
 
-      [System.Windows.Forms.SendKeys]::SendWait('^a')
+      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
 
       Start-Sleep -Milliseconds 200
 
@@ -720,7 +764,7 @@ if ($LoginUser -and $LoginPass) {
 
       Start-Sleep -Milliseconds 600
 
-      [System.Windows.Forms.SendKeys]::SendWait('^a')
+      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
 
       Start-Sleep -Milliseconds 200
 
@@ -782,7 +826,7 @@ if ($LoginUser -and $LoginPass) {
 
           Start-Sleep -Milliseconds 600
 
-          [System.Windows.Forms.SendKeys]::SendWait('^a')
+          [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
 
           Start-Sleep -Milliseconds 200
 
@@ -794,7 +838,7 @@ if ($LoginUser -and $LoginPass) {
 
           Start-Sleep -Milliseconds 600
 
-          [System.Windows.Forms.SendKeys]::SendWait('^a')
+          [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
 
           Start-Sleep -Milliseconds 200
 
@@ -876,6 +920,90 @@ $lines = OcrImage $shotPath
 
 foreach ($ln in $lines) { L ('  ocr| ' + $ln.Text) }
 
+# 截图内容校验（2026-10-27 晚）：窗口被其他弹窗（Edge 欢迎页等）遮挡时，
+# Shot 按 rect 抓到的是遮挡物内容，OCR 里完全没有 billd 字样。
+# 此时激活 BilldDesk 重拍重 OCR 一次，防止后续所有点击作用在遮挡物上。
+$bdSeen = $false
+
+foreach ($ln in $lines) {
+
+  if ($ln.Text -match 'billd') { $bdSeen = $true; break }
+
+}
+
+if (-not $bdSeen) {
+
+  L 'WARN: shot content is not BilldDesk (occluded?), re-focusing and re-shooting'
+
+  [BdWin]::Focus()
+
+  Start-Sleep -Milliseconds 1200
+
+  $ng2 = Shot2 $shotPath $geo
+
+  if ($ng2) {
+
+    $geo = $ng2
+
+    $lines = OcrImage $shotPath
+
+    foreach ($ln in $lines) { L ('  ocr-retry| ' + $ln.Text) }
+
+  }
+
+}
+
+# 页面错误检测（2026-10-27 晚二次实测）：切回被控失败时截图仍是「设备」页，
+# OCR 里含本机 COMPTUERNAME（设备列表条目）⇒ 采集到的会是别人的设备码。
+# 检测到就重试切被控页并重拍（最多 2 轮）。
+$devPageSeen = $false
+
+$myHost = $env:COMPUTERNAME.ToLower()
+
+foreach ($ln in $lines) {
+
+  if ($ln.Text.ToLower().Contains($myHost)) { $devPageSeen = $true; break }
+
+}
+
+$devPageTries = 0
+
+while ($devPageSeen -and $devPageTries -lt 2) {
+
+  $devPageTries++
+
+  L ('WARN: still on device page (switch to controlled lost?), retry ' + $devPageTries)
+
+  [BdWin]::Focus()
+
+  Start-Sleep -Milliseconds 800
+
+  [BdWin]::Click($geo.L + [int](65 * ($geo.W / 600.0)), $geo.T + [int](560 * ($geo.W / 600.0)))
+
+  Start-Sleep -Milliseconds 2000
+
+  $ng3 = Shot2 $shotPath $geo
+
+  if ($ng3) {
+
+    $geo = $ng3
+
+    $lines = OcrImage $shotPath
+
+    foreach ($ln in $lines) { L ('  ocr-retry2| ' + $ln.Text) }
+
+    $devPageSeen = $false
+
+    foreach ($ln in $lines) {
+
+      if ($ln.Text.ToLower().Contains($myHost)) { $devPageSeen = $true; break }
+
+    }
+
+  }
+
+}
+
 
 
 $devCode = ''
@@ -942,7 +1070,7 @@ if ($FixedPassword -and $devCode) {
 
   Start-Sleep -Milliseconds 700
 
-  [System.Windows.Forms.SendKeys]::SendWait('^a')
+  [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
 
   Start-Sleep -Milliseconds 250
 
@@ -1197,30 +1325,29 @@ if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' 
 
       $allText = (($bl | ForEach-Object { $_.Text }) -join ' ').ToLower()
 
-      # 已绑判定两种形态（2026-10-27 三次实测）：
-      #  a) 手动添加：条目备注 cloud-desktop + 本机主机名同现
-      #  b) 登录后自动注册：条目名称直接显示设备码（OCR 去非数字后与 $devCode 相等）
-      $devDigits = ($devCode -replace '\D', '')
-
-      $codeHit = $false
+      # 已绑判定（2026-10-27 四次实测定稿）：**主机名优先**——本机条目必然含
+      # $env:COMPUTERNAME（备注 cloud-desktop 时同行出现）。设备码匹配仅作补充，
+      # 因为若 devCode 本身抓错（页面停在设备页时会抓到别人的码），
+      # 「列表里有这个码」恒真 ⇒ 误判已绑。主机名不会错。
+      $hostHit = $false
 
       foreach ($ln in $bl) {
 
-        if ($devDigits -and (($ln.Text -replace '\D', '') -eq $devDigits)) { $codeHit = $true; break }
+        if ($ln.Text.ToLower().Contains($hostName)) { $hostHit = $true; break }
 
       }
 
-      if ($codeHit) {
+      if ($hostHit) {
 
         $already = $true
 
-        L 'bind: current device already in account list (device-code match)'
+        L 'bind: current device already in account list (hostname match)'
 
       } elseif ($allText.Contains($hostName) -and $allText.Contains('cloud-desktop')) {
 
         $already = $true
 
-        L 'bind: current device already in account list (hostname match)'
+        L 'bind: current device already in account list (hostname match, alltext)'
 
       } else {
 
@@ -1283,15 +1410,7 @@ if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' 
 
             $allText2 = (($bl2 | ForEach-Object { $_.Text }) -join ' ').ToLower()
 
-            $codeHit2 = $false
-
-            foreach ($ln in $bl2) {
-
-              if ($devDigits -and (($ln.Text -replace '\D', '') -eq $devDigits)) { $codeHit2 = $true; break }
-
-            }
-
-            if ($codeHit2 -or ($allText2.Contains($hostName) -and $allText2.Contains('cloud-desktop'))) { $already = $true }
+            if ($allText2.Contains($hostName)) { $already = $true }
 
           }
 
@@ -1356,15 +1475,7 @@ if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' 
 
           $allTextV = (($vbl | ForEach-Object { $_.Text }) -join ' ').ToLower()
 
-          $codeHitV = $false
-
-          foreach ($ln in $vbl) {
-
-            if ($devDigits -and (($ln.Text -replace '\D', '') -eq $devDigits)) { $codeHitV = $true; break }
-
-          }
-
-          if ($codeHitV -or ($allTextV.Contains($hostName) -and $allTextV.Contains('cloud-desktop'))) { $script:BindState = 'ok' }
+          if ($allTextV.Contains($hostName)) { $script:BindState = 'ok' }
 
         }
 
