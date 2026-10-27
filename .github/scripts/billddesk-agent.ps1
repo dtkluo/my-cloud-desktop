@@ -514,6 +514,25 @@ while ((Get-Date) -lt $rectDeadline) {
 
   Start-Sleep -Milliseconds 800
 
+  # 句柄追新（2026-10-27 二次实测）：开机双实例竞争时，开局抓到的 hwnd 可能属于
+  # 随后死掉的瞬时实例（rect 恒 0），真正活下来的窗口晚 1~2 秒才出现。
+  # 每 3 轮重新枚举一次，句柄变了就自动跟过去（死句柄不会被枚举到，天然淘汰）。
+  if (($rectTries % 3) -eq 0) {
+
+    $oldMain = [BdWin]::Main
+
+    [void][BdWin]::FindMain()
+
+    if ([BdWin]::Main -ne $oldMain -and [BdWin]::Main -ne [IntPtr]::Zero) {
+
+      L ('window re-found: ' + $oldMain + ' -> ' + [BdWin]::Main)
+
+      [BdWin]::Focus()
+
+    }
+
+  }
+
   $geo = Shot $shotPath
 
   if ($geo) { break }
@@ -1178,7 +1197,26 @@ if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' 
 
       $allText = (($bl | ForEach-Object { $_.Text }) -join ' ').ToLower()
 
-      if ($allText.Contains($hostName) -and $allText.Contains('cloud-desktop')) {
+      # 已绑判定两种形态（2026-10-27 三次实测）：
+      #  a) 手动添加：条目备注 cloud-desktop + 本机主机名同现
+      #  b) 登录后自动注册：条目名称直接显示设备码（OCR 去非数字后与 $devCode 相等）
+      $devDigits = ($devCode -replace '\D', '')
+
+      $codeHit = $false
+
+      foreach ($ln in $bl) {
+
+        if ($devDigits -and (($ln.Text -replace '\D', '') -eq $devDigits)) { $codeHit = $true; break }
+
+      }
+
+      if ($codeHit) {
+
+        $already = $true
+
+        L 'bind: current device already in account list (device-code match)'
+
+      } elseif ($allText.Contains($hostName) -and $allText.Contains('cloud-desktop')) {
 
         $already = $true
 
@@ -1245,7 +1283,15 @@ if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' 
 
             $allText2 = (($bl2 | ForEach-Object { $_.Text }) -join ' ').ToLower()
 
-            if ($allText2.Contains($hostName) -and $allText2.Contains('cloud-desktop')) { $already = $true }
+            $codeHit2 = $false
+
+            foreach ($ln in $bl2) {
+
+              if ($devDigits -and (($ln.Text -replace '\D', '') -eq $devDigits)) { $codeHit2 = $true; break }
+
+            }
+
+            if ($codeHit2 -or ($allText2.Contains($hostName) -and $allText2.Contains('cloud-desktop'))) { $already = $true }
 
           }
 
@@ -1310,7 +1356,15 @@ if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' 
 
           $allTextV = (($vbl | ForEach-Object { $_.Text }) -join ' ').ToLower()
 
-          if ($allTextV.Contains($hostName) -and $allTextV.Contains('cloud-desktop')) { $script:BindState = 'ok' }
+          $codeHitV = $false
+
+          foreach ($ln in $vbl) {
+
+            if ($devDigits -and (($ln.Text -replace '\D', '') -eq $devDigits)) { $codeHitV = $true; break }
+
+          }
+
+          if ($codeHitV -or ($allTextV.Contains($hostName) -and $allTextV.Contains('cloud-desktop'))) { $script:BindState = 'ok' }
 
         }
 
