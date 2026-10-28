@@ -12,7 +12,7 @@
         否则 BilldDesk 采不到系统声音。
 #>
 param(
-  [string]$InstallerUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/billddesk-lab/BilldDesk_v0.621.0.exe',
+  [string]$InstallerUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/billddesk-lab/BilldDesk_v0.623.0.exe',
   [string]$WorkDir = 'C:\billddesk-auto',
   [string]$AgentUser = 'runneradmin',
   [int]$AgentTimeoutSec = 180,
@@ -113,9 +113,20 @@ if (Test-Path $audioScript) {
 Beat 'audio-done'
 
 # ---------------- 1. 安装 ----------------
+# 目标版本随 InstallerUrl 走；已装同版本就跳过，装的是旧版则升级。
+$targetVer = '0.623'
+$needInstall = $true
 if (Test-Path $appExe) {
-  L 'already installed: ' + $appExe
-} else {
+  $curVer = ''
+  try { $curVer = [string](Get-Item $appExe).VersionInfo.FileVersion } catch { }
+  if ($curVer -like ($targetVer + '*')) {
+    $needInstall = $false
+    L ('already installed: ' + $curVer)
+  } else {
+    L ('version differs cur=' + $curVer + ' target=' + $targetVer + ', will upgrade')
+  }
+}
+if ($needInstall) {
   $pkg = Join-Path $WorkDir 'BilldDesk-setup.exe'
   if (-not (Test-Path $pkg) -or (Get-Item $pkg).Length -lt 10MB) {
     Beat 'download-start'
@@ -142,19 +153,37 @@ if (Test-Path $appExe) {
   }
   L ('installer size=' + [int]((Get-Item $pkg).Length/1MB) + 'MB')
 
+  # 升级前必须先停服务并杀干净所有 BilldDesk 进程（2026-10-28 实测）：
+  # 服务是 session 0 的 LocalSystem 进程，Inno 的 RestartManager 关不掉它，
+  # 配合 /SUPPRESSMSGBOXES 时安装器会直接 Abort（exit=5）。
+  $svc0 = Get-Service -Name 'BilldDeskService' -ErrorAction SilentlyContinue
+  if ($svc0) {
+    try { Stop-Service -Name 'BilldDeskService' -Force -ErrorAction Stop; L 'service stopped for upgrade' } catch { L ('stop service: ' + $_.Exception.Message) }
+    try { Set-Service -Name 'BilldDeskService' -StartupType Disabled -ErrorAction Stop } catch { }
+  }
+  for ($k = 0; $k -lt 3; $k++) {
+    $procs = Get-Process -Name 'BilldDesk', 'BilldDeskService' -ErrorAction SilentlyContinue
+    if (-not $procs) { break }
+    foreach ($pp in $procs) {
+      L ('  kill ' + $pp.Name + ' pid=' + $pp.Id)
+      try { Stop-Process -Id $pp.Id -Force -ErrorAction Stop } catch { }
+    }
+    Start-Sleep -Seconds 3
+  }
+
   L 'installing silently...'
-  $args = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL', '/SP-',
-            ('/LOG=' + (Join-Path $WorkDir 'install.log')))
-  $proc = Start-Process -FilePath $pkg -ArgumentList $args -Wait -PassThru -NoNewWindow
+  $insArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL', '/SP-',
+               '/NOCLOSEAPPLICATIONS', ('/LOG=' + (Join-Path $WorkDir 'install.log')))
+  $proc = Start-Process -FilePath $pkg -ArgumentList $insArgs -Wait -PassThru -NoNewWindow
   L ('installer exit=' + $proc.ExitCode)
-  Start-Sleep -Seconds 5
+  Start-Sleep -Seconds 6
   if (-not (Test-Path $appExe)) {
     Write-State ([ordered]@{ ok = $false; state = 'install-failed'; error = ('installer exit ' + $proc.ExitCode); updated_at = (Get-Date).ToUniversalTime().ToString('o') })
     L 'FATAL install failed'
     L 'DONE'
     exit 11
   }
-  L 'installed ok'
+  try { L ('installed ver=' + [string](Get-Item $appExe).VersionInfo.FileVersion) } catch { }
 }
 
 # ---------------- 2. 服务 ----------------
@@ -192,9 +221,10 @@ if (Test-Path $agentSrc) {
 if (Test-Path $jsonPath) { Remove-Item $jsonPath -Force -ErrorAction SilentlyContinue }
 
 # ---------------- 4. 注册并运行交互会话任务 ----------------
-# 连接密码用恒定值（见 param 注释），agent 会幂等地重设，不再随机生成。
-$FixedPassword = $ConnectPassword
-L ('fixed password (constant) len=' + $FixedPassword.Length)
+# 2026-10-28 v0.623.0 起不再固定连接密码：新版修好了「多端登录同一账号不显示在线
+# 设备」，「同账号在线设备」分组里直接点远程即可，密码是否恒定已不影响可用性。
+# 因此 agent 走 -SkipFixedPassword（省掉改密弹窗，也就没有 MISMATCH 风险），
+# 但仍会读一次当前密码用于「添加设备」时的备注条目。
 $taskName = 'BilldDeskAgent'
 try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
 $fbPart = ''
@@ -202,7 +232,7 @@ if ($FallbackPassword) { $fbPart = ' -FallbackPassword "' + $FallbackPassword + 
 $loginPart = ''
 if ($AccountUser -and $AccountPass) { $loginPart = ' -LoginUser "' + $AccountUser + '" -LoginPass "' + $AccountPass + '"' }
 $actArg = '-NoProfile -ExecutionPolicy Bypass -File "' + $agentDst + '" -OutDir "' + $WorkDir +
-          '" -WaitWindowSec 90 -FixedPassword "' + $FixedPassword + '"' + $fbPart + $loginPart
+          '" -WaitWindowSec 90 -SkipFixedPassword' + $fbPart + $loginPart
 $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $actArg
 $principal = New-ScheduledTaskPrincipal -UserId $AgentUser -LogonType Interactive -RunLevel Highest
 $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -227,10 +257,10 @@ while ((Get-Date) -lt $deadline) {
   }
 }
 if (-not $got) {
-  # 兜底：用已知密码 + 让 agent 的下一次运行补设备码
+  # 兜底：密码已不再固定，这里不再伪造值，避免状态文件给出错误凭据
   $got = [pscustomobject]@{
     ok = $false; state = 'agent-timeout'; device_code = ''; device_uuid = ''
-    password = $FixedPassword; window = ''; session = 0; account = $AccountUser; login = ''; bind = ''; error = 'agent did not produce result in time'
+    password = ''; window = ''; session = 0; account = $AccountUser; login = ''; bind = ''; error = 'agent did not produce result in time'
   }
   L 'agent timeout'
 }
@@ -250,6 +280,8 @@ $out = [ordered]@{
   account     = [string]$got.account
   login       = [string]$got.login
   bind        = [string]$got.bind
+  remark      = [string]$got.remark
+  dev_clean   = [string]$got.dev_clean
   window      = [string]$got.window
   session     = [int]$got.session
   install_dir = $installDir
