@@ -747,22 +747,36 @@ if ($LoginUser -and $LoginPass) {
     # ---- 1) 切到主控页，用底部 tab 高亮确认 ----
     # 2026-10-29 第二次开机实测：Shot2 在登录导航阶段连续 4 轮全灭
     # （GetWindowRect 瞬时归零 + fallback save 无重试），导致整个登录被跳过。
-    # 导航判定改用「裸截图」：固定用 $geo 坐标 CopyFromScreen + 独立文件名，
-    # 完全绕开 rect 检查和可能被锁的目标文件。$geo 开机时已确认 600x600@212,60，
-    # 窗口不会瞬移，裸图内容可靠。
-    $bare = Join-Path $OutDir 'shot-login-bare.png'
+    # 导航判定改用「裸截图」：固定用 $geo 坐标 CopyFromScreen，绕开 rect 检查。
+    # 2026-10-29 教训：固定文件名会被 OCR/杀软句柄锁死（第一轮 Save 成功、之后
+    # 连续 4 轮 GDI+ generic error），改为每轮唯一文件名 + Save 3 次重试 +
+    # catch 内 Dispose，彻底绕开同路径锁竞争。
+    $script:BareN = 0
+    $script:BarePath = ''
 
     function BareShot {
+      $bmp = $null
       try {
+        $script:BareN++
+        $bare = Join-Path $OutDir ('shot-login-bare-' + $script:BareN + '.png')
+        $script:BarePath = $bare
         $bmp = New-Object System.Drawing.Bitmap([int]$geo.W, [int]$geo.H)
         $g2 = [System.Drawing.Graphics]::FromImage($bmp)
         $g2.CopyFromScreen([int]$geo.L, [int]$geo.T, 0, 0, $bmp.Size)
         $g2.Dispose()
         if (Test-Path $bare) { Remove-Item $bare -Force -ErrorAction SilentlyContinue }
-        $bmp.Save($bare, [System.Drawing.Imaging.ImageFormat]::Png)
-        $bmp.Dispose()
+        $tries = 0
+        while ($true) {
+          try { $bmp.Save($bare, [System.Drawing.Imaging.ImageFormat]::Png); break }
+          catch {
+            $tries++
+            if ($tries -ge 3) { L ('login: bare save failed ' + $bare); return $false }
+            Start-Sleep -Milliseconds 500
+          }
+        }
         return $true
       } catch { L ('login: bare shot failed: ' + $_.Exception.Message); return $false }
+      finally { try { if ($bmp) { $bmp.Dispose() } } catch { } }
     }
 
     $onMain = $false
@@ -776,7 +790,7 @@ if ($LoginUser -and $LoginPass) {
       Start-Sleep -Milliseconds 2500
 
       if (BareShot) {
-        if (Test-MainTabActive $bare $geo $sf) { $onMain = $true; break }
+        if (Test-MainTabActive $script:BarePath $geo $sf) { $onMain = $true; break }
         L ('login: main tab not active yet (round ' + $r1 + ')')
       } else {
         L ('login: bare shot failed round ' + $r1)
@@ -791,7 +805,7 @@ if ($LoginUser -and $LoginPass) {
       # 点主控丢点击时 UI 往往正停在登录页。直接看当前画面有没有
       # 登录页顶部「登录」黄字，有就在当前页提交账号，不必非切到主控页。
       if (BareShot) {
-        if (Test-LoginTabPixel $bare $geo $sf) {
+        if (Test-LoginTabPixel $script:BarePath $geo $sf) {
           $onMain = $true
           L 'login: nav failed but login tab visible on current page'
         }
@@ -804,7 +818,7 @@ if ($LoginUser -and $LoginPass) {
       $script:LoginState = 'nav-failed'
       L 'login: cannot reach main-control page'
 
-    } elseif (Test-LoginTabPixel $bare $geo $sf) {
+    } elseif (Test-LoginTabPixel $script:BarePath $geo $sf) {
 
       L 'login page detected, submitting account'
 
@@ -842,7 +856,7 @@ if ($LoginUser -and $LoginPass) {
 
         if (-not (BareShot)) { Start-Sleep -Milliseconds 2500; continue }
 
-        if (-not (Test-LoginTabPixel $bare $geo $sf)) { $script:LoginState = 'ok'; break }
+        if (-not (Test-LoginTabPixel $script:BarePath $geo $sf)) { $script:LoginState = 'ok'; break }
 
         L ('login: still on login page, verify round ' + $v)
         Start-Sleep -Milliseconds 2500
