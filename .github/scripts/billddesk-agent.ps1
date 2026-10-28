@@ -908,13 +908,53 @@ if ($LoginUser -and $LoginPass) {
 
 $tabScale = $geo.W / 600.0
 
-[BdWin]::Click($geo.L + [int](65 * $tabScale), $geo.T + [int](560 * $tabScale))
+# 2026-10-28 根因修正：底部 tab 图标 x 会漂移（65 → 42 实测漂 23px），
+# 点偏了就落在图标间隙、点击无效，UI 停在设备页导致后续眼睛点击全落空。
+# 对策：点一次验证一次 —— 被控页特征 =「允许远程本机」黄色开关（600 基准
+# x[160,210] y[100,180] 一带有黄像素），不确认就换 x 重试。
+function Test-BeikongPixel([string]$p) {
 
-Start-Sleep -Milliseconds 1500
+  $b = New-Object System.Drawing.Bitmap($p)
 
-$ng = Shot2 $shotPath $geo
+  $hit = 0
 
-if ($ng) { $geo = $ng } else { L 'WARN: shot failed after switching to 被控' }
+  for ($x = 160; $x -le 210; $x++) {
+
+    for ($y = 100; $y -le 180; $y++) {
+
+      $c = $b.GetPixel($x, $y)
+
+      if ($c.R -gt 200 -and $c.G -gt 140 -and $c.B -lt 120) { $hit++ }
+
+    }
+
+  }
+
+  $b.Dispose()
+
+  return ($hit -ge 15)
+
+}
+
+$bk = $false
+
+foreach ($tx in @(65, 42, 88, 55)) {
+
+  [BdWin]::Click($geo.L + [int]($tx * $tabScale), $geo.T + [int](560 * $tabScale))
+
+  Start-Sleep -Milliseconds 1500
+
+  $ng = Shot2 $shotPath $geo
+
+  if ($ng) { $geo = $ng } else { L 'WARN: shot failed after switching to 被控'; continue }
+
+  if (Test-BeikongPixel $shotPath) { $bk = $true; L ('beikong tab confirmed at x=' + $tx); break }
+
+  L ('beikong tab NOT confirmed at x=' + $tx)
+
+}
+
+if (-not $bk) { L 'WARN: beikong tab unconfirmed after all x, continue anyway' }
 
 $lines = OcrImage $shotPath
 
@@ -1058,15 +1098,110 @@ if ($FixedPassword -and $devCode) {
 
   L ('set fixed password len=' + $FixedPassword.Length)
 
+  # 2026-10-28 根因修正：改密弹窗的「旧密码」框是空的，必须先点眼睛读出当前
+  # 密码填进去，否则提交被服务端拒绝（连续三次 MISMATCH 均因此，非时序问题）。
+  # 眼睛 600 基准 = (500, devY+105)，与铅笔 (545, devY+105) 同行（1024x768 实测）。
+  $oldPwd = ''
+
+  [BdWin]::Click($geo.L + [int](500 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
+
+  Start-Sleep -Milliseconds 2000
+
+  $curShot = Join-Path $OutDir 'shot-curpwd.png'
+
+  if (Shot $curShot) {
+
+    $cl = OcrImage $curShot
+
+    foreach ($ln in $cl) { L ('  curpwd-ocr| ' + $ln.Text) }
+
+    foreach ($ln in $cl) {
+
+      if ($ln.Y -lt ($devY + 55) -or $ln.Y -gt ($devY + 130)) { continue }
+
+      $t = ($ln.Text -replace '[^A-Za-z0-9]', '')
+
+      if ($t.Length -ge 5 -and $t.Length -le 16) { $oldPwd = $t; break }
+
+    }
+
+  }
+
+  # 点回去重新掩码
+
+  [BdWin]::Click($geo.L + [int](500 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
+
+  Start-Sleep -Milliseconds 500
+
+  # 2026-10-28 补充：若密码本来就是明文（上次流程遗留），上面点眼睛把它切回了
+  # 掩码导致 OCR 读空 —— 再点一次恢复明文重读；仍读不到才放弃（放弃时不提交
+  # 改密，避免用错误旧密码做无效提交）。
+
+  if (-not $oldPwd) {
+
+    L 'curpwd not read, re-click eye (plain<->mask toggle)'
+
+    [BdWin]::Click($geo.L + [int](500 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
+
+    Start-Sleep -Milliseconds 2000
+
+    if (Shot $curShot) {
+
+      $cl = OcrImage $curShot
+
+      foreach ($ln in $cl) { L ('  curpwd-ocr2| ' + $ln.Text) }
+
+      foreach ($ln in $cl) {
+
+        if ($ln.Y -lt ($devY + 55) -or $ln.Y -gt ($devY + 130)) { continue }
+
+        $t = ($ln.Text -replace '[^A-Za-z0-9]', '')
+
+        if ($t.Length -ge 5 -and $t.Length -le 16) { $oldPwd = $t; break }
+
+      }
+
+    }
+
+    [BdWin]::Click($geo.L + [int](500 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
+
+    Start-Sleep -Milliseconds 500
+
+    L ('old password(from ocr2)=' + $oldPwd)
+
+  }
+
+  L ('old password(from ocr)=' + $oldPwd)
+
+  if (-not $oldPwd) {
+
+    L 'old password unknown, SKIP fixed password change'
+
+  } else {
+
   # 铅笔图标：与眼睛同行（devY+105 中心），x≈545（600 基准）
 
   [BdWin]::Click($geo.L + [int](545 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
 
   Start-Sleep -Milliseconds 1800
 
-  # 新密码输入框（对话框内固定位置）
+  # 旧密码输入框（2026-10-28 实测 600 基准 (341,306)，即全屏 (553,366)）
 
-  [BdWin]::Click($geo.L + [int](338 * $scaleF), $geo.T + [int](360 * $scaleF))
+  [BdWin]::Click($geo.L + [int](341 * $scaleF), $geo.T + [int](306 * $scaleF))
+
+  Start-Sleep -Milliseconds 700
+
+  [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
+
+  Start-Sleep -Milliseconds 250
+
+  [System.Windows.Forms.SendKeys]::SendWait($oldPwd)
+
+  Start-Sleep -Milliseconds 500
+
+  # 新密码输入框（对话框内固定位置 (341,360)）
+
+  [BdWin]::Click($geo.L + [int](341 * $scaleF), $geo.T + [int](360 * $scaleF))
 
   Start-Sleep -Milliseconds 700
 
@@ -1080,11 +1215,13 @@ if ($FixedPassword -and $devCode) {
 
   # 确定按钮
 
-  [BdWin]::Click($geo.L + [int](307 * $scaleF), $geo.T + [int](415 * $scaleF))
+  [BdWin]::Click($geo.L + [int](300 * $scaleF), $geo.T + [int](415 * $scaleF))
 
   Start-Sleep -Milliseconds 2500
 
   L 'fixed password submitted'
+
+  }   # end else (old password known)
 
 }
 
