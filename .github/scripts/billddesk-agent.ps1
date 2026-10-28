@@ -1547,7 +1547,7 @@ if ($devCode -and $LoginUser -and $script:LoginState -ne 'error' -and $script:Lo
 
     Add-Type -AssemblyName System.Windows.Forms
     $bs = $geo.W / 600.0
-    $script:Remark = if ($DeviceRemark) { $DeviceRemark } else { 'cloud-desktop-' + (Get-Date -Format 'MMdd-HHmm') }
+    $script:Remark = if ($DeviceRemark) { $DeviceRemark } else { 'cloud-desktop-' + (Get-Date).ToUniversalTime().AddHours(8).ToString('MMdd-HHmm') }
 
     # 进「设备」页 + 选「我的设备」分组
     [BdWin]::Click($geo.L + [int](300 * $bs), $geo.T + [int](552 * $bs))
@@ -1586,7 +1586,12 @@ if ($devCode -and $LoginUser -and $script:LoginState -ne 'error' -and $script:Lo
         $online = Get-RowOnline $ds ([int]$rw.Y) $bs
         $isMine = ($rw.Code -eq $devCode)
         L ('  row code=' + $rw.Code + ' y=' + [int]$rw.Y + ' mine=' + $isMine + ' online=' + $online)
-        if ($isMine) { $mine = $true; continue }
+        if ($isMine -and -not $mine) {
+          # 本机旧条目：照样删掉，下面重新添加一次，让备注总是本次开机的时间戳
+          $mine = $true
+          $victim = $rw
+          continue
+        }
         if (-not $online -and -not $victim) { $victim = $rw }
       }
 
