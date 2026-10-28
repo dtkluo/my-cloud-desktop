@@ -311,7 +311,7 @@ function Shot([string]$path) {
 
   $w = $r.R - $r.L; $h = $r.B - $r.T
 
-  if ($w -le 10 -or $h -le 10) { return $null }
+  if ($w -le 10 -or $h -le 10) { L ('shot: rect invalid ' + $w + 'x' + $h); return $null }
 
   $bmp = New-Object System.Drawing.Bitmap($w, $h)
 
@@ -335,7 +335,7 @@ function Shot([string]$path) {
 
       $saveTries++
 
-      if ($saveTries -ge 3) { $bmp.Dispose(); return $null }
+      if ($saveTries -ge 3) { L ('shot: save failed ' + $path); $bmp.Dispose(); return $null }
 
       Start-Sleep -Milliseconds 500
 
@@ -375,13 +375,23 @@ function Shot2([string]$path, $fallback) {
 
         if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
 
-        $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        # fallback 保存也要重试：文件锁/杀软短暂占用时一次 Save 就抛异常，
+        # 2026-10-29 开机实测导致 Shot2 连续 4 轮全灭、登录兜底判定整个没跑。
+        $st2 = 0
+        while ($true) {
+          try { $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); break }
+          catch {
+            $st2++
+            if ($st2 -ge 3) { L ('shot2: fallback save failed ' + $path); $bmp.Dispose(); return $null }
+            Start-Sleep -Milliseconds 500
+          }
+        }
 
         $bmp.Dispose()
 
         return $fallback
 
-      } catch { return $null }
+      } catch { L ('shot2: fallback exception: ' + $_.Exception.Message); return $null }
 
     }
 
@@ -735,6 +745,26 @@ if ($LoginUser -and $LoginPass) {
     }
 
     # ---- 1) 切到主控页，用底部 tab 高亮确认 ----
+    # 2026-10-29 第二次开机实测：Shot2 在登录导航阶段连续 4 轮全灭
+    # （GetWindowRect 瞬时归零 + fallback save 无重试），导致整个登录被跳过。
+    # 导航判定改用「裸截图」：固定用 $geo 坐标 CopyFromScreen + 独立文件名，
+    # 完全绕开 rect 检查和可能被锁的目标文件。$geo 开机时已确认 600x600@212,60，
+    # 窗口不会瞬移，裸图内容可靠。
+    $bare = Join-Path $OutDir 'shot-login-bare.png'
+
+    function BareShot {
+      try {
+        $bmp = New-Object System.Drawing.Bitmap([int]$geo.W, [int]$geo.H)
+        $g2 = [System.Drawing.Graphics]::FromImage($bmp)
+        $g2.CopyFromScreen([int]$geo.L, [int]$geo.T, 0, 0, $bmp.Size)
+        $g2.Dispose()
+        if (Test-Path $bare) { Remove-Item $bare -Force -ErrorAction SilentlyContinue }
+        $bmp.Save($bare, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+        return $true
+      } catch { L ('login: bare shot failed: ' + $_.Exception.Message); return $false }
+    }
+
     $onMain = $false
 
     for ($r1 = 1; $r1 -le 4; $r1++) {
@@ -745,12 +775,12 @@ if ($LoginUser -and $LoginPass) {
       [BdWin]::Click($ofx + [int](185 * $sf), $ofy + [int](552 * $sf))
       Start-Sleep -Milliseconds 2500
 
-      $mg = Shot2 $loginShot $geo
-      if (-not $mg) { L ('login: shot failed round ' + $r1); Start-Sleep -Milliseconds 2500; continue }
-      $geo = $mg
-
-      if (Test-MainTabActive $loginShot $mg $sf) { $onMain = $true; break }
-      L ('login: main tab not active yet (round ' + $r1 + ')')
+      if (BareShot) {
+        if (Test-MainTabActive $bare $geo $sf) { $onMain = $true; break }
+        L ('login: main tab not active yet (round ' + $r1 + ')')
+      } else {
+        L ('login: bare shot failed round ' + $r1)
+      }
       Start-Sleep -Milliseconds 800
 
     }
@@ -760,10 +790,8 @@ if ($LoginUser -and $LoginPass) {
       # 兜底（2026-10-29 首次真机开机暴露）：nav 全失败不代表已登录 ——
       # 点主控丢点击时 UI 往往正停在登录页。直接看当前画面有没有
       # 登录页顶部「登录」黄字，有就在当前页提交账号，不必非切到主控页。
-      $dg0 = Shot2 $loginShot $geo
-      if ($dg0) {
-        $geo = $dg0
-        if (Test-LoginTabPixel $loginShot $geo $sf) {
+      if (BareShot) {
+        if (Test-LoginTabPixel $bare $geo $sf) {
           $onMain = $true
           L 'login: nav failed but login tab visible on current page'
         }
@@ -776,22 +804,32 @@ if ($LoginUser -and $LoginPass) {
       $script:LoginState = 'nav-failed'
       L 'login: cannot reach main-control page'
 
-    } elseif (Test-LoginTabPixel $loginShot $geo $sf) {
+    } elseif (Test-LoginTabPixel $bare $geo $sf) {
 
       L 'login page detected, submitting account'
 
-      [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](201 * $sf))
-      Start-Sleep -Milliseconds 500
-      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 20}')
-      Start-Sleep -Milliseconds 300
-      TypeSlow $LoginUser
+      # 每框连填两遍：2026-10-29 手动补登实测单击偶发不聚焦（账号进了密码框），
+      # 第二遍全清重填覆盖第一遍，任一遍聚焦成功最终值都正确。
+      for ($fillPass = 1; $fillPass -le 2; $fillPass++) {
 
-      [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](256 * $sf))
-      Start-Sleep -Milliseconds 500
-      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 20}')
-      Start-Sleep -Milliseconds 300
-      TypeSlow $LoginPass
-      Start-Sleep -Milliseconds 400
+        [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](201 * $sf))
+        Start-Sleep -Milliseconds 500
+        [System.Windows.Forms.SendKeys]::SendWait('^a')
+        Start-Sleep -Milliseconds 300
+        [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE 20}')
+        Start-Sleep -Milliseconds 300
+        TypeSlow $LoginUser
+
+        [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](256 * $sf))
+        Start-Sleep -Milliseconds 500
+        [System.Windows.Forms.SendKeys]::SendWait('^a')
+        Start-Sleep -Milliseconds 300
+        [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE 20}')
+        Start-Sleep -Milliseconds 300
+        TypeSlow $LoginPass
+        Start-Sleep -Milliseconds 400
+
+      }
 
       [BdWin]::Click($ofx + [int](300 * $sf), $ofy + [int](311 * $sf))
       L 'login: submitted'
@@ -799,14 +837,12 @@ if ($LoginUser -and $LoginPass) {
 
       $script:LoginState = 'submitted'
 
-      # 双轮验证：黄色「登录」字消失 = 已进主控页
+      # 双轮验证：黄色「登录」字消失 = 已进主控页（裸截图，理由同导航段）
       for ($v = 1; $v -le 2; $v++) {
 
-        $vg = Shot2 $loginShot $geo
-        if (-not $vg) { Start-Sleep -Milliseconds 2500; continue }
-        $geo = $vg
+        if (-not (BareShot)) { Start-Sleep -Milliseconds 2500; continue }
 
-        if (-not (Test-LoginTabPixel $loginShot $vg $sf)) { $script:LoginState = 'ok'; break }
+        if (-not (Test-LoginTabPixel $bare $geo $sf)) { $script:LoginState = 'ok'; break }
 
         L ('login: still on login page, verify round ' + $v)
         Start-Sleep -Milliseconds 2500
