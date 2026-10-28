@@ -737,19 +737,10 @@ jobs:
           Write-Host "=========================================="
 
           # ---------- E1.5 + E2. virtual audio + BilldDesk remote control ----------
-          # User compared both and picked BilldDesk (2026-10-28): native WebRTC/UDP,
-          # media no longer via HTTP tunnel. Script internally: virtual audio ->
-          # silent install -> BilldDeskService -> runneradmin interactive task in
-          # session 2 -> OCR device code + fixed password -> C:\billddesk-auto\billddesk.json.
-          Write-Host "===== E1.5 + E2. 虚拟声卡 + BilldDesk 远程控制（runneradmin 会话）====="
+          # User picked BilldDesk after comparing both (2026-10-28).
+          Write-Host "===== E1.5 + E2. BilldDesk remote control (runneradmin session) ====="
           & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/billddesk-bootstrap.ps1
           Write-Host "billddesk-bootstrap.ps1 exit=$LASTEXITCODE"
-          if (Test-Path 'C:\billddesk-auto\billddesk.json') {
-            try {
-              $bds = Get-Content 'C:\billddesk-auto\billddesk.json' -Raw | ConvertFrom-Json
-              Write-Host "  BilldDesk -> code=$($bds.device_code) pwd=$($bds.password) state=$($bds.state) audio=$($bds.audio)"
-            } catch { Write-Host "  billddesk.json parse failed" }
-          }
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
