@@ -1078,6 +1078,18 @@ if (-not $devCode) {
 
 L ("devCode=" + $devCode + " devY=" + $devY)
 
+# 2026-10-28 下午根因：OCR 给出的行 Y 偶发偏小 40px 上下（截图重试期间窗口在动画，
+# 拿到的是上一帧/缩放图的 bbox）。devY 一旦偏小，2.5 节的眼睛点击坐标与密码行
+# OCR 过滤窗口全部落空 ⇒ 读不到旧密码 ⇒ SKIP 改密 ⇒ 状态文件写的是假固定密码。
+# 历史实测（1024x768 全屏、600x600 窗口）devY 稳定在 192 附近；越界即用兜底值。
+if ($devY -lt 0 -or $devY -lt 172 -or $devY -gt 240) {
+
+  L ('WARN: devY out of range (' + $devY + '), clamp to fallback 192')
+
+  $devY = 192.0
+
+}
+
 
 
 # ---------- 2.5 固定连接密码（-FixedPassword 传入时执行） ----------
@@ -1091,6 +1103,8 @@ L ("devCode=" + $devCode + " devY=" + $devY)
 # 把密码改成 bootstrap 生成的随机 8 位，此后不再轮换，状态文件里的值始终有效。
 
 if ($FixedPassword -and $devCode) {
+
+  $script:PwdChangeSkipped = $false
 
   Add-Type -AssemblyName System.Windows.Forms
 
@@ -1117,11 +1131,12 @@ if ($FixedPassword -and $devCode) {
 
     foreach ($ln in $cl) {
 
-      if ($ln.Y -lt ($devY + 55) -or $ln.Y -gt ($devY + 130)) { continue }
+      # 2026-10-28：窗口放宽到 +165（原 +130），并排除设备码行自身
+      if ($ln.Y -lt ($devY + 50) -or $ln.Y -gt ($devY + 165)) { continue }
 
       $t = ($ln.Text -replace '[^A-Za-z0-9]', '')
 
-      if ($t.Length -ge 5 -and $t.Length -le 16) { $oldPwd = $t; break }
+      if ($t.Length -ge 5 -and $t.Length -le 16 -and $t -ne $devCode) { $oldPwd = $t; break }
 
     }
 
@@ -1153,11 +1168,12 @@ if ($FixedPassword -and $devCode) {
 
       foreach ($ln in $cl) {
 
-        if ($ln.Y -lt ($devY + 55) -or $ln.Y -gt ($devY + 130)) { continue }
+        # 2026-10-28：窗口放宽到 +165（原 +130），并排除设备码行自身
+        if ($ln.Y -lt ($devY + 50) -or $ln.Y -gt ($devY + 165)) { continue }
 
         $t = ($ln.Text -replace '[^A-Za-z0-9]', '')
 
-        if ($t.Length -ge 5 -and $t.Length -le 16) { $oldPwd = $t; break }
+        if ($t.Length -ge 5 -and $t.Length -le 16 -and $t -ne $devCode) { $oldPwd = $t; break }
 
       }
 
@@ -1174,6 +1190,8 @@ if ($FixedPassword -and $devCode) {
   L ('old password(from ocr)=' + $oldPwd)
 
   if (-not $oldPwd) {
+
+    $script:PwdChangeSkipped = $true
 
     L 'old password unknown, SKIP fixed password change'
 
@@ -1408,13 +1426,13 @@ if ($devCode -and $devY -ge 0) {
     $l2 = OcrImage $pwdShot
 
     foreach ($ln in $l2) { L ('  ocr2| ' + $ln.Text) }
-    # 只在「密码行」的 OCR 行里找密码：窗口内 y ∈ [devY+55, devY+130]
+    # 只在「密码行」的 OCR 行里找密码：窗口内 y ∈ [devY+50, devY+165]
     # （设备码行在 devY，密码行在其下方；顶部横幅/版本号都在带外）
     $ocrPwd = ''
     foreach ($ln in $l2) {
-      if ($ln.Y -lt ($devY + 55) -or $ln.Y -gt ($devY + 130)) { continue }
+      if ($ln.Y -lt ($devY + 50) -or $ln.Y -gt ($devY + 165)) { continue }
       $t = ($ln.Text -replace '[^A-Za-z0-9]', '')
-      if ($t.Length -ge 5 -and $t.Length -le 16) { $ocrPwd = $t; break }
+      if ($t.Length -ge 5 -and $t.Length -le 16 -and $t -ne $devCode) { $ocrPwd = $t; break }
     }
     L ('password(from ocr)=' + $ocrPwd)
     if ($FixedPassword) {
@@ -1431,6 +1449,11 @@ if ($devCode -and $devY -ge 0) {
         # 固定密码设置失败（输入被拒/提交失败）：OCR 读到的真实密码仍可用，如实上报
         $password = $ocrPwd
         L ('fixed password MISMATCH, reporting real value len=' + $ocrPwd.Length)
+      } elseif ($script:PwdChangeSkipped) {
+        # 改密被跳过（旧密码没读到）⇒ 真实密码仍是自动密码，绝不能把没生效的
+        # FixedPassword 当真实值推给手机（2026-10-28 主人就是按这个假值连接失败的）
+        $password = ''
+        L 'password change skipped, refuse to report unverified fixed value'
       } else {
         $password = $FixedPassword
         L 'password unverifiable by ocr, keep fixed value'
