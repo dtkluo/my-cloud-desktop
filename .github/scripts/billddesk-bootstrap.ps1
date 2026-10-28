@@ -221,10 +221,11 @@ if (Test-Path $agentSrc) {
 if (Test-Path $jsonPath) { Remove-Item $jsonPath -Force -ErrorAction SilentlyContinue }
 
 # ---------------- 4. 注册并运行交互会话任务 ----------------
-# 2026-10-28 v0.623.0 起不再固定连接密码：新版修好了「多端登录同一账号不显示在线
-# 设备」，「同账号在线设备」分组里直接点远程即可，密码是否恒定已不影响可用性。
-# 因此 agent 走 -SkipFixedPassword（省掉改密弹窗，也就没有 MISMATCH 风险），
-# 但仍会读一次当前密码用于「添加设备」时的备注条目。
+# 2026-10-29 起流程大幅简化（主人定调）：
+#   · 不再固定连接密码 —— 「同账号在线设备」里直接点远程，不需要密码；
+#   · 不再维护设备列表（不删残留、不加备注）—— 残留条目本来就不会出现在
+#     「同账号在线设备」里。
+# agent 只做三件事：确保登录 dtka1、读设备码、读一次当前密码（备用展示）。
 $taskName = 'BilldDeskAgent'
 try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
 $fbPart = ''
@@ -232,7 +233,7 @@ if ($FallbackPassword) { $fbPart = ' -FallbackPassword "' + $FallbackPassword + 
 $loginPart = ''
 if ($AccountUser -and $AccountPass) { $loginPart = ' -LoginUser "' + $AccountUser + '" -LoginPass "' + $AccountPass + '"' }
 $actArg = '-NoProfile -ExecutionPolicy Bypass -File "' + $agentDst + '" -OutDir "' + $WorkDir +
-          '" -WaitWindowSec 90 -SkipFixedPassword' + $fbPart + $loginPart
+          '" -WaitWindowSec 90' + $fbPart + $loginPart
 $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $actArg
 $principal = New-ScheduledTaskPrincipal -UserId $AgentUser -LogonType Interactive -RunLevel Highest
 $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
