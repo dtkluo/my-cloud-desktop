@@ -15,7 +15,7 @@ param(
   [string]$InstallerUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/billddesk-lab/BilldDesk_v0.623.0.exe',
   [string]$WorkDir = 'C:\billddesk-auto',
   [string]$AgentUser = 'runneradmin',
-  [int]$AgentTimeoutSec = 180,
+  [int]$AgentTimeoutSec = 300,
   [string]$FallbackPassword = 'r9R479JO',
   # 连接密码必须恒定：dtka1 账号下的「设备绑定」是按 设备码+密码 在服务端校验的，
   # 每次开机换密码会让绑定变成「失效」（2026-10-27 实测）。固定后开机 agent 会幂等地
