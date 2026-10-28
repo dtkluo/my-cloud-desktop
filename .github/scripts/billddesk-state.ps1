@@ -41,11 +41,8 @@ $state = switch ($r.state) {
     default          { if ($r.ok) { 'ready' } else { 'failed' } }
 }
 
-$remarkTxt = [string]$r.remark
-if ([string]::IsNullOrWhiteSpace($remarkTxt)) { $remarkTxt = '-' }
-
 $msg = if ($state -eq 'ready') {
-    'BilldDesk 已就绪（设备码 ' + $r.device_code + '，备注 ' + $remarkTxt + '）'
+    'BilldDesk 已就绪（设备码 ' + $r.device_code + '，账号 ' + $r.account + '）'
 } elseif ($state -eq 'degraded') {
     'BilldDesk 已启动但凭据不完整（' + $r.state + '），请查看界面'
 } else {
