@@ -736,13 +736,14 @@ jobs:
           Write-Host "  连接方式     : mstsc -> 输入 $vip"
           Write-Host "=========================================="
 
-          # ---------- E1.5 + E2. virtual audio + BilldDesk remote control ----------
-          # BilldDesk replaces Piik (native WebRTC/UDP, media no longer via HTTP tunnel).
-          # All steps live in billddesk-bootstrap.ps1, which keeps this run block short:
+          # ---------- E1.5 + E2. virtual audio + Piik browser remote control ----------
+          # Rolled back from BilldDesk per user request (2026-10-28). Both live in one
+          # script so the workflow only carries a single, proven-shaped call.
+          # Must run after EasyTier is up: --lan-address validates the IPv4 is bound.
           # GitHub caps the whole run script at 21000 UTF-8 bytes and returns 422 above it.
-          Write-Host "===== E1.5 + E2. BilldDesk remote control (runneradmin session) ====="
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/billddesk-bootstrap.ps1
-          Write-Host "billddesk-bootstrap.ps1 exit=$LASTEXITCODE"
+          Write-Host "===== E1.5 + E2. 虚拟声卡 + Piik 自动分享（浏览器远程控制）====="
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/piik-bootstrap.ps1 -LanAddress $vip -SessionHours $hours
+          Write-Host "piik-bootstrap.ps1 exit=$LASTEXITCODE"
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
