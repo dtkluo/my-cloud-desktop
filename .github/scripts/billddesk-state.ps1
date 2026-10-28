@@ -42,7 +42,7 @@ $state = switch ($r.state) {
 }
 
 $msg = if ($state -eq 'ready') {
-    'BilldDesk 已就绪（设备码 ' + $r.device_code + '，runneradmin 会话，原生 WebRTC UDP）'
+    'BilldDesk 已就绪（设备码 ' + $r.device_code + '，备注 ' + [string]$r.remark + '）'
 } elseif ($state -eq 'degraded') {
     'BilldDesk 已启动但凭据不完整（' + $r.state + '），请查看界面'
 } else {
@@ -57,6 +57,8 @@ $node = [ordered]@{
     account        = [string]$r.account
     login          = [string]$r.login
     bind           = [string]$r.bind
+    remark         = [string]$r.remark
+    dev_clean      = [string]$r.dev_clean
     kind           = 'webrtc-native'
     window         = [string]$r.window
     session        = [int]$r.session
