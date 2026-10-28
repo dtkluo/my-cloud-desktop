@@ -737,7 +737,7 @@ if ($LoginUser -and $LoginPass) {
     # ---- 1) 切到主控页，用底部 tab 高亮确认 ----
     $onMain = $false
 
-    for ($r1 = 1; $r1 -le 3; $r1++) {
+    for ($r1 = 1; $r1 -le 4; $r1++) {
 
       [BdWin]::Focus()
       Start-Sleep -Milliseconds 500
@@ -746,11 +746,28 @@ if ($LoginUser -and $LoginPass) {
       Start-Sleep -Milliseconds 2500
 
       $mg = Shot2 $loginShot $geo
-      if (-not $mg) { L ('login: shot failed round ' + $r1); continue }
+      if (-not $mg) { L ('login: shot failed round ' + $r1); Start-Sleep -Milliseconds 2500; continue }
       $geo = $mg
 
       if (Test-MainTabActive $loginShot $mg $sf) { $onMain = $true; break }
       L ('login: main tab not active yet (round ' + $r1 + ')')
+      Start-Sleep -Milliseconds 800
+
+    }
+
+    if (-not $onMain) {
+
+      # 兜底（2026-10-29 首次真机开机暴露）：nav 全失败不代表已登录 ——
+      # 点主控丢点击时 UI 往往正停在登录页。直接看当前画面有没有
+      # 登录页顶部「登录」黄字，有就在当前页提交账号，不必非切到主控页。
+      $dg0 = Shot2 $loginShot $geo
+      if ($dg0) {
+        $geo = $dg0
+        if (Test-LoginTabPixel $loginShot $geo $sf) {
+          $onMain = $true
+          L 'login: nav failed but login tab visible on current page'
+        }
+      }
 
     }
 
@@ -1188,7 +1205,9 @@ $result = [ordered]@{
 
   ok        = [bool]($devCode -and $password)
 
-  state     = if ($devCode -and $password) { 'ready' } elseif ($devCode) { 'no-password' } else { 'no-device-code' }
+  state     = if ($devCode -and $password -and $script:LoginState -in @('ok','already','skipped','')) { 'ready' }
+              elseif ($devCode -and $password) { 'degraded-login' }
+              elseif ($devCode) { 'no-password' } else { 'no-device-code' }
 
   device_code = if ($devCode) { ($devCode.Substring(0,3) + ' ' + $devCode.Substring(3,3) + ' ' + $devCode.Substring(6,3)) } else { '' }
 
