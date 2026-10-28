@@ -33,6 +33,7 @@ $r = Get-Content -LiteralPath $ResultFile -Raw | ConvertFrom-Json
 
 $state = switch ($r.state) {
     'ready'          { 'ready' }
+    'degraded-login' { 'degraded' }
     'no-password'    { 'degraded' }
     'no-device-code' { 'degraded' }
     'no-window'      { 'failed' }
@@ -44,7 +45,11 @@ $state = switch ($r.state) {
 $msg = if ($state -eq 'ready') {
     'BilldDesk 已就绪（设备码 ' + $r.device_code + '，账号 ' + $r.account + '）'
 } elseif ($state -eq 'degraded') {
-    'BilldDesk 已启动但凭据不完整（' + $r.state + '），请查看界面'
+    if ($r.state -eq 'degraded-login') {
+        'BilldDesk 已启动但自动登录失败（login=' + $r.login + '），同账号在线设备看不到这台，请告知助手排查'
+    } else {
+        'BilldDesk 已启动但凭据不完整（' + $r.state + '），请查看界面'
+    }
 } else {
     'BilldDesk 启动失败：' + $r.error
 }
