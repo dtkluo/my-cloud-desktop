@@ -1502,44 +1502,29 @@ if (-not $password -and $FixedPassword) {
 # ---------- 3.5 设备列表维护（BilldDesk v0.623.0） ----------
 #
 # 2026-10-28 晚 v0.623.0 实测改版：开发者修好了「多端登录同一账号不显示在线设备」，
-# 「设备」页现在是「同账号在线设备 / 我的设备」两个分组。同账号在线设备可直接远控，
-# 只要客户端登录了账号就会出现，**不再依赖固定连接密码**（旧版必须改密才能保住绑定）。
+# 「设备」页现在是「同账号在线设备 / 我的设备」两个分组，同账号在线设备可直接远控，
+# 因此 **不再需要固定连接密码**（旧版必须改密才能保住绑定）。
 #
-# 本段职责（对应主人的两条要求）：
-#   1) 删除「我的设备」里所有离线/失效条目 —— 即上一个实例残留的死设备；
-#   2) 把本机作为一条新设备加进去，备注 cloud-desktop-MMdd-HHmm（带时间），
-#      主人在列表里一眼能看出哪条是刚开机这台。
+# 本段职责（对应主人两条要求）：
+#   1) 删除「我的设备」里上一个实例残留的条目；
+#   2) 把本机重新添加一条，备注 cd-MMdd-HHmm（北京时间），主人在列表里一眼区分。
+#
+# 关键实测事实（决定实现方式）：
+#   · 条目带备注时，列表**只显示备注**，不再显示 9 位设备码 —— 所以不能用设备码识别条目，
+#     唯一可靠的锚点是备注文本本身（cd-xxxx-xxxx）。
+#   · 备注同时出现在添加弹窗和列表里，判断「是否已在列表」必须先 ESC 收掉弹窗。
+#   · 只碰 cd- 开头的条目 => 绝不会误删主人自己添加的其他设备（如 HP-KOLJS）。
+#   · 同一设备码重复添加会被服务端拒绝，所以先删旧条目再加新条目。
 #
 # 坐标（600 基准，1024x768 / 窗口 600x600@212,60 实测）：
-#   设备 tab(300,552)  我的设备分组(90,152)  添加设备按钮(229,61)
+#   设备 tab(300,552)  我的设备分组(90,152)  添加设备(229,61)
 #   添加弹窗：备注(340,277) 设备码(340,332) 连接密码(340,388) 确定(300,441)
 #   删除确认：取消(229,352) 确定(372,352)
-#   条目 n 设备码行 y = 108 + 70*(n-1)；该行删除按钮 (549, y+25)
-#
-# 判定在线/离线用颜色而不是 OCR 文字：OCR 引擎是 en-US，读不了「在线/离线」，
-# 但状态文字的颜色可靠 —— 在线是绿色，离线/失效是灰色。
+#   条目备注行 y；该行删除按钮 (549, y+30)
 
 $script:BindState = ''
 $script:Remark = ''
 $script:DevClean = ''
-
-function Get-RowOnline([string]$p, [int]$y, [double]$sc) {
-  # 状态文字在设备码行下方 +12..+34，绿色判定；坐标按 600 基准缩放
-  $b = New-Object System.Drawing.Bitmap($p)
-  $hit = 0
-  $y0 = [Math]::Max(0, [int](($y + 12) * $sc))
-  $y1 = [Math]::Min($b.Height - 1, [int](($y + 34) * $sc))
-  $x0 = [int](242 * $sc); $x1 = [int](300 * $sc)
-  for ($py = $y0; $py -le $y1; $py++) {
-    for ($px = $x0; $px -le $x1; $px++) {
-      if ($px -ge $b.Width) { break }
-      $c = $b.GetPixel($px, $py)
-      if ($c.G -gt 130 -and $c.G -gt ($c.R + 35) -and $c.G -gt ($c.B + 25)) { $hit++ }
-    }
-  }
-  $b.Dispose()
-  return ($hit -ge 10)
-}
 
 if ($devCode -and $LoginUser -and $script:LoginState -ne 'error' -and $script:LoginState -ne 'unknown' -and $script:LoginState -ne '') {
 
@@ -1547,9 +1532,44 @@ if ($devCode -and $LoginUser -and $script:LoginState -ne 'error' -and $script:Lo
 
     Add-Type -AssemblyName System.Windows.Forms
     $bs = $geo.W / 600.0
-    $script:Remark = if ($DeviceRemark) { $DeviceRemark } else { 'cloud-desktop-' + (Get-Date).ToUniversalTime().AddHours(8).ToString('MMdd-HHmm') }
+    if ($DeviceRemark) { $script:Remark = $DeviceRemark }
+    else { $script:Remark = 'cd-' + (Get-Date).ToUniversalTime().AddHours(8).ToString('MMdd-HHmm') }
+    $remarkRe = 'cd-\d\d\d\d-\d\d\d\d'
 
-    # 进「设备」页 + 选「我的设备」分组
+    function TypeSlow([string]$t) {
+      foreach ($c in $t.ToCharArray()) {
+        [System.Windows.Forms.SendKeys]::SendWait([string]$c)
+        Start-Sleep -Milliseconds 110
+      }
+      Start-Sleep -Milliseconds 500
+    }
+
+    function NormKey([string]$t) { return ($t -replace '[^A-Za-z0-9]', '').ToLower() }
+
+    function FillField([double]$fx, [double]$fy, [string]$val, [string]$label) {
+      $want = NormKey $val
+      for ($fi = 1; $fi -le 3; $fi++) {
+        [BdWin]::Click($geo.L + [int]($fx * $bs), $geo.T + [int]($fy * $bs))
+        Start-Sleep -Milliseconds 700
+        [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
+        Start-Sleep -Milliseconds 1000
+        TypeSlow $val
+        $fs = Join-Path $OutDir ('shot-field-' + $label + '.png')
+        if (Shot $fs) {
+          $hit = $false
+          foreach ($l in (OcrImage $fs)) {
+            if ((NormKey $l.Text).Contains($want)) { $hit = $true; break }
+          }
+          if ($hit) { L ('  field ' + $label + ' ok (try ' + $fi + ')'); return $true }
+          L ('  field ' + $label + ' text mismatch, retry')
+        } else { L ('  field ' + $label + ' shot failed, retry') }
+        Start-Sleep -Milliseconds 400
+      }
+      L ('  field ' + $label + ' FAILED after 3 tries')
+      return $false
+    }
+
+    # ---- 进「设备」页 + 选「我的设备」分组 ----
     [BdWin]::Click($geo.L + [int](300 * $bs), $geo.T + [int](552 * $bs))
     Start-Sleep -Milliseconds 2000
     [BdWin]::Click($geo.L + [int](90 * $bs), $geo.T + [int](152 * $bs))
@@ -1557,50 +1577,35 @@ if ($devCode -and $LoginUser -and $script:LoginState -ne 'error' -and $script:Lo
 
     $ds = Join-Path $OutDir 'shot-dev.png'
 
-    # ---- A. 逐个删除离线/失效条目（每删一条重新截图，行会往上移） ----
+    # ---- A. 删掉备注不是本次的 cd- 条目 = 上一个实例残留 ----
     $delCount = 0
 
-    for ($round = 1; $round -le 6; $round++) {
+    for ($round = 1; $round -le 5; $round++) {
 
       $dg = Shot2 $ds $geo
-      if (-not $dg) { $script:DevClean = 'no-shot'; break }
+      if (-not $dg) { L 'dev: no shot'; break }
       $geo = $dg
 
       $dl = OcrImage $ds
       foreach ($ln in $dl) { L ('  dev-ocr| ' + [int]$ln.Y + ' ' + $ln.Text) }
 
-      # 设备码行：8~10 位纯数字，且落在列表区（y 80..480）
-      $rows = @()
-      foreach ($ln in $dl) {
-        $t = ($ln.Text -replace '[^0-9]', '')
-        if ($t.Length -ge 8 -and $t.Length -le 10 -and $ln.Y -gt 80 -and $ln.Y -lt 480) {
-          $rows += [pscustomobject]@{ Code = $t; Y = [double]$ln.Y }
-        }
-      }
-
-      if ($rows.Count -eq 0) { L 'dev: no device rows parsed'; break }
-
-      $mine = $false
       $victim = $null
-      foreach ($rw in ($rows | Sort-Object Y)) {
-        $online = Get-RowOnline $ds ([int]$rw.Y) $bs
-        $isMine = ($rw.Code -eq $devCode)
-        L ('  row code=' + $rw.Code + ' y=' + [int]$rw.Y + ' mine=' + $isMine + ' online=' + $online)
-        if ($isMine -and -not $mine) {
-          # 本机旧条目：照样删掉，下面重新添加一次，让备注总是本次开机的时间戳
-          $mine = $true
-          $victim = $rw
-          continue
+      $mineNow = $false
+      foreach ($ln in $dl) {
+        $t = $ln.Text.Trim()
+        if ($t -match $remarkRe) {
+          L ('  remark-row ' + $t + ' y=' + [int]$ln.Y)
+          if ($t -eq $script:Remark) { $mineNow = $true }
+          elseif (-not $victim) { $victim = [pscustomobject]@{ Text = $t; Y = [double]$ln.Y } }
         }
-        if (-not $online -and -not $victim) { $victim = $rw }
       }
 
-      if (-not $victim) { L 'dev: no offline leftover to delete'; break }
+      if (-not $victim) { L 'dev: no stale cd- entry left'; break }
 
-      L ('dev: delete leftover code=' + $victim.Code + ' y=' + [int]$victim.Y)
-      [BdWin]::Click($geo.L + [int](549 * $bs), $geo.T + [int](($victim.Y + 25) * $bs))
+      L ('dev: delete stale entry ' + $victim.Text + ' y=' + [int]$victim.Y)
+      [BdWin]::Click($geo.L + [int](549 * $bs), $geo.T + [int](($victim.Y + 30) * $bs))
       Start-Sleep -Milliseconds 1600
-      [BdWin]::Click($geo.L + [int](372 * $bs), $geo.T + [int](352 * $bs))   # 确认「确定」
+      [BdWin]::Click($geo.L + [int](372 * $bs), $geo.T + [int](352 * $bs))
       Start-Sleep -Milliseconds 2600
       $delCount++
 
@@ -1608,69 +1613,78 @@ if ($devCode -and $LoginUser -and $script:LoginState -ne 'error' -and $script:Lo
 
     $script:DevClean = 'deleted-' + $delCount
 
-    # ---- B. 本机不在列表就添加（备注带时间戳） ----
+    # ---- B. 本次条目不在列表就添加 ----
     $dg2 = Shot2 $ds $geo
     if ($dg2) { $geo = $dg2 }
-    $dl2 = OcrImage $ds
     $mineNow = $false
-    foreach ($ln in $dl2) {
-      if ((($ln.Text -replace '[^0-9]', '')) -eq $devCode) { $mineNow = $true; break }
+    foreach ($ln in (OcrImage $ds)) {
+      if ($ln.Text.Trim() -eq $script:Remark) { $mineNow = $true; break }
     }
 
     if ($mineNow) {
 
-      L 'dev: current instance already listed, skip add'
+      L 'dev: current instance already listed'
       $script:BindState = 'already'
 
     } elseif (-not $password) {
 
-      L 'dev: no current password readable, skip add (cleanup only)'
+      L 'dev: no readable password, cleanup only'
       $script:BindState = 'skip-no-password'
 
     } else {
 
-      L ('dev: add current device remark=' + $script:Remark)
-      [BdWin]::Click($geo.L + [int](229 * $bs), $geo.T + [int](61 * $bs))     # 添加设备
-      Start-Sleep -Milliseconds 1800
+      $script:BindState = 'fail'
 
-      [BdWin]::Click($geo.L + [int](340 * $bs), $geo.T + [int](277 * $bs))    # 设备备注
-      Start-Sleep -Milliseconds 500
-      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
-      Start-Sleep -Milliseconds 250
-      [System.Windows.Forms.SendKeys]::SendWait($script:Remark)
-      Start-Sleep -Milliseconds 400
+      for ($tryAdd = 1; $tryAdd -le 2; $tryAdd++) {
 
-      [BdWin]::Click($geo.L + [int](340 * $bs), $geo.T + [int](332 * $bs))    # 设备代码
-      Start-Sleep -Milliseconds 500
-      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
-      Start-Sleep -Milliseconds 250
-      [System.Windows.Forms.SendKeys]::SendWait($devCode)
-      Start-Sleep -Milliseconds 400
+        L ('dev: add attempt ' + $tryAdd + ' remark=' + $script:Remark)
 
-      [BdWin]::Click($geo.L + [int](340 * $bs), $geo.T + [int](388 * $bs))    # 连接密码
-      Start-Sleep -Milliseconds 500
-      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
-      Start-Sleep -Milliseconds 250
-      [System.Windows.Forms.SendKeys]::SendWait($password)
-      Start-Sleep -Milliseconds 400
+        [BdWin]::Click($geo.L + [int](229 * $bs), $geo.T + [int](61 * $bs))
+        Start-Sleep -Milliseconds 2200
 
-      [BdWin]::Click($geo.L + [int](300 * $bs), $geo.T + [int](441 * $bs))    # 确定
-      Start-Sleep -Milliseconds 3200
+        $okRemark = FillField 340 277 $script:Remark 'remark'
+        $okCode   = FillField 340 332 $devCode 'code'
 
-      # 验证：重截图，列表里应出现本机设备码
-      $dg3 = Shot2 $ds $geo
-      $script:BindState = 'unverified'
-      if ($dg3) {
-        $geo = $dg3
-        $dl3 = OcrImage $ds
-        foreach ($ln in $dl3) {
-          if ((($ln.Text -replace '[^0-9]', '')) -eq $devCode) { $script:BindState = 'ok'; break }
+        [BdWin]::Click($geo.L + [int](340 * $bs), $geo.T + [int](388 * $bs))
+        Start-Sleep -Milliseconds 700
+        [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
+        Start-Sleep -Milliseconds 1000
+        TypeSlow $password
+
+        $preShot = Join-Path $OutDir ('shot-addform' + $tryAdd + '.png')
+        if (Shot $preShot) { foreach ($ln in (OcrImage $preShot)) { L ('  add-form| ' + $ln.Text) } }
+
+        if (-not ($okRemark -and $okCode)) {
+          L 'dev: field fill failed, close form and retry'
+          [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+          Start-Sleep -Milliseconds 1500
+          continue
         }
+
+        [BdWin]::Click($geo.L + [int](300 * $bs), $geo.T + [int](441 * $bs))
+        Start-Sleep -Milliseconds 3500
+
+        # 先收掉可能残留的弹窗，再看列表（弹窗里也有备注文本）
+        [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+        Start-Sleep -Milliseconds 1500
+
+        $dg4 = Shot2 $ds $geo
+        if ($dg4) { $geo = $dg4 }
+        $hit = $false
+        foreach ($ln in (OcrImage $ds)) {
+          if ($ln.Text.Trim() -match $remarkRe) {
+            L ('  list-row ' + $ln.Text.Trim())
+            if ($ln.Text.Trim() -eq $script:Remark) { $hit = $true }
+          }
+        }
+        if ($hit) { $script:BindState = 'ok'; break }
+        L 'dev: remark absent from list after submit'
+
       }
 
-      L ('dev: add verify state=' + $script:BindState)
-
     }
+
+    L ('dev: verify state=' + $script:BindState)
 
     # 回「被控」页
     [BdWin]::Click($geo.L + [int](60 * $bs), $geo.T + [int](552 * $bs))
