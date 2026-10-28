@@ -34,11 +34,18 @@ param(
 
   [string]$LoginPass = ''
 
+  , [switch]$SkipFixedPassword
+
+  , [string]$DeviceRemark = ''
+
 )
 
 
 
 $ErrorActionPreference = 'Continue'
+
+$script:PwdChangeSkipped = $false
+
 
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Force -Path $OutDir | Out-Null }
 
@@ -1102,7 +1109,7 @@ if ($devY -lt 0 -or $devY -lt 172 -or $devY -gt 240) {
 
 # 把密码改成 bootstrap 生成的随机 8 位，此后不再轮换，状态文件里的值始终有效。
 
-if ($FixedPassword -and $devCode) {
+if ($FixedPassword -and $devCode -and -not $SkipFixedPassword) {
 
   $script:PwdChangeSkipped = $false
 
@@ -1492,225 +1499,183 @@ if (-not $password -and $FixedPassword) {
 
 
 
-# ---------- 3.5 自动重绑账号（设备码每次开机都会变） ----------
-
-# 重大发现（2026-10-27）：BilldDesk 每次开机都是全新安装，设备身份重新生成，
-# 设备码会变（679640907 -> 024063379），旧绑定必然失效。所以每次开机在
-# 登录 + 固定密码之后，检查账号「设备」列表里有没有当前设备码，没有就自动
-# 「添加设备」绑一次（备注 cloud-desktop）。密码恒定 ⇒ 绑定立即在线。
-# 坐标 600 基准（v0.621 于 1024x768 实测）：设备 tab(299,560)、添加设备(229,62)、
-# 备注(344,278) 设备代码(344,333) 连接密码(344,388) 确定(300,443)。
+# ---------- 3.5 设备列表维护（BilldDesk v0.623.0） ----------
+#
+# 2026-10-28 晚 v0.623.0 实测改版：开发者修好了「多端登录同一账号不显示在线设备」，
+# 「设备」页现在是「同账号在线设备 / 我的设备」两个分组。同账号在线设备可直接远控，
+# 只要客户端登录了账号就会出现，**不再依赖固定连接密码**（旧版必须改密才能保住绑定）。
+#
+# 本段职责（对应主人的两条要求）：
+#   1) 删除「我的设备」里所有离线/失效条目 —— 即上一个实例残留的死设备；
+#   2) 把本机作为一条新设备加进去，备注 cloud-desktop-MMdd-HHmm（带时间），
+#      主人在列表里一眼能看出哪条是刚开机这台。
+#
+# 坐标（600 基准，1024x768 / 窗口 600x600@212,60 实测）：
+#   设备 tab(300,552)  我的设备分组(90,152)  添加设备按钮(229,61)
+#   添加弹窗：备注(340,277) 设备码(340,332) 连接密码(340,388) 确定(300,441)
+#   删除确认：取消(229,352) 确定(372,352)
+#   条目 n 设备码行 y = 108 + 70*(n-1)；该行删除按钮 (549, y+25)
+#
+# 判定在线/离线用颜色而不是 OCR 文字：OCR 引擎是 en-US，读不了「在线/离线」，
+# 但状态文字的颜色可靠 —— 在线是绿色，离线/失效是灰色。
 
 $script:BindState = ''
+$script:Remark = ''
+$script:DevClean = ''
 
-if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' -and $script:LoginState -ne 'unknown') {
+function Get-RowOnline([string]$p, [int]$y, [double]$sc) {
+  # 状态文字在设备码行下方 +12..+34，绿色判定；坐标按 600 基准缩放
+  $b = New-Object System.Drawing.Bitmap($p)
+  $hit = 0
+  $y0 = [Math]::Max(0, [int](($y + 12) * $sc))
+  $y1 = [Math]::Min($b.Height - 1, [int](($y + 34) * $sc))
+  $x0 = [int](242 * $sc); $x1 = [int](300 * $sc)
+  for ($py = $y0; $py -le $y1; $py++) {
+    for ($px = $x0; $px -le $x1; $px++) {
+      if ($px -ge $b.Width) { break }
+      $c = $b.GetPixel($px, $py)
+      if ($c.G -gt 130 -and $c.G -gt ($c.R + 35) -and $c.G -gt ($c.B + 25)) { $hit++ }
+    }
+  }
+  $b.Dispose()
+  return ($hit -ge 10)
+}
+
+if ($devCode -and $LoginUser -and $script:LoginState -ne 'error' -and $script:LoginState -ne 'unknown' -and $script:LoginState -ne '') {
 
   try {
 
     Add-Type -AssemblyName System.Windows.Forms
+    $bs = $geo.W / 600.0
+    $script:Remark = if ($DeviceRemark) { $DeviceRemark } else { 'cloud-desktop-' + (Get-Date -Format 'MMdd-HHmm') }
 
-    $bindScale = $geo.W / 600.0
-
-    # 设备列表不显示设备码（只有 备注/主机名/IP/版本），所以绑定判定不能用码匹配，
-    # 改用主机名：本机条目 = 「cloud-desktop + $env:COMPUTERNAME」同行出现
-    # （2026-10-27 实测 OCR 能稳定读出 runnervmdaln5）。
-    $hostName = $env:COMPUTERNAME.ToLower()
-
-    # 打开「设备」页
-    [BdWin]::Click($geo.L + [int](299 * $bindScale), $geo.T + [int](560 * $bindScale))
-
+    # 进「设备」页 + 选「我的设备」分组
+    [BdWin]::Click($geo.L + [int](300 * $bs), $geo.T + [int](552 * $bs))
     Start-Sleep -Milliseconds 2000
+    [BdWin]::Click($geo.L + [int](90 * $bs), $geo.T + [int](152 * $bs))
+    Start-Sleep -Milliseconds 1500
 
-    $bindShot = Join-Path $OutDir 'shot-bind.png'
+    $ds = Join-Path $OutDir 'shot-dev.png'
 
-    $bgeo = Shot2 $bindShot $geo
+    # ---- A. 逐个删除离线/失效条目（每删一条重新截图，行会往上移） ----
+    $delCount = 0
 
-    $already = $false
+    for ($round = 1; $round -le 6; $round++) {
 
-    $staleRows = @()
+      $dg = Shot2 $ds $geo
+      if (-not $dg) { $script:DevClean = 'no-shot'; break }
+      $geo = $dg
 
-    if ($bgeo) {
+      $dl = OcrImage $ds
+      foreach ($ln in $dl) { L ('  dev-ocr| ' + [int]$ln.Y + ' ' + $ln.Text) }
 
-      $bl = OcrImage $bindShot
-
-      foreach ($ln in $bl) { L ('  bind-ocr| ' + $ln.Text) }
-
-      $allText = (($bl | ForEach-Object { $_.Text }) -join ' ').ToLower()
-
-      # 已绑判定（2026-10-27 四次实测定稿）：**主机名优先**——本机条目必然含
-      # $env:COMPUTERNAME（备注 cloud-desktop 时同行出现）。设备码匹配仅作补充，
-      # 因为若 devCode 本身抓错（页面停在设备页时会抓到别人的码），
-      # 「列表里有这个码」恒真 ⇒ 误判已绑。主机名不会错。
-      $hostHit = $false
-
-      foreach ($ln in $bl) {
-
-        if ($ln.Text.ToLower().Contains($hostName)) { $hostHit = $true; break }
-
-      }
-
-      if ($hostHit) {
-
-        $already = $true
-
-        L 'bind: current device already in account list (hostname match)'
-
-      } elseif ($allText.Contains($hostName) -and $allText.Contains('cloud-desktop')) {
-
-        $already = $true
-
-        L 'bind: current device already in account list (hostname match, alltext)'
-
-      } else {
-
-        # 收集历史失效的 cloud-desktop 条目（同行无本机主机名），先清掉再重绑，
-        # 避免每次开机堆一条死条目。行文本 y + 15 即该行「删除」按钮（600 基准 x=543）。
-        foreach ($ln in $bl) {
-
-          if ($ln.Text -match 'cloud-desktop' -and ($ln.Text.ToLower() -notmatch [regex]::Escape($hostName))) {
-
-            $staleRows += [double]$ln.Y
-
-          }
-
+      # 设备码行：8~10 位纯数字，且落在列表区（y 80..480）
+      $rows = @()
+      foreach ($ln in $dl) {
+        $t = ($ln.Text -replace '[^0-9]', '')
+        if ($t.Length -ge 8 -and $t.Length -le 10 -and $ln.Y -gt 80 -and $ln.Y -lt 480) {
+          $rows += [pscustomobject]@{ Code = $t; Y = [double]$ln.Y }
         }
-
       }
+
+      if ($rows.Count -eq 0) { L 'dev: no device rows parsed'; break }
+
+      $mine = $false
+      $victim = $null
+      foreach ($rw in ($rows | Sort-Object Y)) {
+        $online = Get-RowOnline $ds ([int]$rw.Y) $bs
+        $isMine = ($rw.Code -eq $devCode)
+        L ('  row code=' + $rw.Code + ' y=' + [int]$rw.Y + ' mine=' + $isMine + ' online=' + $online)
+        if ($isMine) { $mine = $true; continue }
+        if (-not $online -and -not $victim) { $victim = $rw }
+      }
+
+      if (-not $victim) { L 'dev: no offline leftover to delete'; break }
+
+      L ('dev: delete leftover code=' + $victim.Code + ' y=' + [int]$victim.Y)
+      [BdWin]::Click($geo.L + [int](549 * $bs), $geo.T + [int](($victim.Y + 25) * $bs))
+      Start-Sleep -Milliseconds 1600
+      [BdWin]::Click($geo.L + [int](372 * $bs), $geo.T + [int](352 * $bs))   # 确认「确定」
+      Start-Sleep -Milliseconds 2600
+      $delCount++
 
     }
 
-    if (-not $bgeo) {
+    $script:DevClean = 'deleted-' + $delCount
 
-      # 连截图都拿不到（窗口被遮挡/最小化）：不盲操作，如实上报
-      $script:BindState = 'no-shot'
+    # ---- B. 本机不在列表就添加（备注带时间戳） ----
+    $dg2 = Shot2 $ds $geo
+    if ($dg2) { $geo = $dg2 }
+    $dl2 = OcrImage $ds
+    $mineNow = $false
+    foreach ($ln in $dl2) {
+      if ((($ln.Text -replace '[^0-9]', '')) -eq $devCode) { $mineNow = $true; break }
+    }
 
-      L 'bind: skip, no shot available'
+    if ($mineNow) {
+
+      L 'dev: current instance already listed, skip add'
+      $script:BindState = 'already'
+
+    } elseif (-not $password) {
+
+      L 'dev: no current password readable, skip add (cleanup only)'
+      $script:BindState = 'skip-no-password'
 
     } else {
 
-      foreach ($ry in $staleRows) {
+      L ('dev: add current device remark=' + $script:Remark)
+      [BdWin]::Click($geo.L + [int](229 * $bs), $geo.T + [int](61 * $bs))     # 添加设备
+      Start-Sleep -Milliseconds 1800
 
-        L ('bind: deleting stale cloud-desktop row at y=' + [int]$ry)
+      [BdWin]::Click($geo.L + [int](340 * $bs), $geo.T + [int](277 * $bs))    # 设备备注
+      Start-Sleep -Milliseconds 500
+      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
+      Start-Sleep -Milliseconds 250
+      [System.Windows.Forms.SendKeys]::SendWait($script:Remark)
+      Start-Sleep -Milliseconds 400
 
-        [BdWin]::Click($geo.L + [int](543 * $bindScale), $geo.T + [int](($ry + 15.0) * $bindScale))
+      [BdWin]::Click($geo.L + [int](340 * $bs), $geo.T + [int](332 * $bs))    # 设备代码
+      Start-Sleep -Milliseconds 500
+      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
+      Start-Sleep -Milliseconds 250
+      [System.Windows.Forms.SendKeys]::SendWait($devCode)
+      Start-Sleep -Milliseconds 400
 
-        Start-Sleep -Milliseconds 1500
+      [BdWin]::Click($geo.L + [int](340 * $bs), $geo.T + [int](388 * $bs))    # 连接密码
+      Start-Sleep -Milliseconds 500
+      [System.Windows.Forms.SendKeys]::SendWait('{END}{BACKSPACE 40}')
+      Start-Sleep -Milliseconds 250
+      [System.Windows.Forms.SendKeys]::SendWait($password)
+      Start-Sleep -Milliseconds 400
 
-        # 确认删除对话框（600 基准）：确定 (368,351)
-        [BdWin]::Click($geo.L + [int](368 * $bindScale), $geo.T + [int](351 * $bindScale))
+      [BdWin]::Click($geo.L + [int](300 * $bs), $geo.T + [int](441 * $bs))    # 确定
+      Start-Sleep -Milliseconds 3200
 
-        Start-Sleep -Milliseconds 2500
-
-      }
-
-      if ($already) {
-
-        $script:BindState = 'already'
-
-      } else {
-
-        # 清理后复查一次（可能清完才发现本机条目本来就在）
-        if ($staleRows.Count -gt 0) {
-
-          $bg2 = Shot2 $bindShot $geo
-
-          if ($bg2) {
-
-            $bl2 = OcrImage $bindShot
-
-            foreach ($ln in $bl2) { L ('  bind-ocr2| ' + $ln.Text) }
-
-            $allText2 = (($bl2 | ForEach-Object { $_.Text }) -join ' ').ToLower()
-
-            if ($allText2.Contains($hostName)) { $already = $true }
-
-          }
-
+      # 验证：重截图，列表里应出现本机设备码
+      $dg3 = Shot2 $ds $geo
+      $script:BindState = 'unverified'
+      if ($dg3) {
+        $geo = $dg3
+        $dl3 = OcrImage $ds
+        foreach ($ln in $dl3) {
+          if ((($ln.Text -replace '[^0-9]', '')) -eq $devCode) { $script:BindState = 'ok'; break }
         }
-
       }
 
-      if ($already) {
-
-        $script:BindState = 'already'
-
-        L 'bind: current device already in account list'
-
-      } else {
-
-        L 'bind: adding current device to account'
-
-        [BdWin]::Click($geo.L + [int](229 * $bindScale), $geo.T + [int](62 * $bindScale))
-
-        Start-Sleep -Milliseconds 1500
-
-        [BdWin]::Click($geo.L + [int](344 * $bindScale), $geo.T + [int](278 * $bindScale))
-
-        Start-Sleep -Milliseconds 500
-
-        [System.Windows.Forms.SendKeys]::SendWait('cloud-desktop')
-
-        Start-Sleep -Milliseconds 400
-
-        [BdWin]::Click($geo.L + [int](344 * $bindScale), $geo.T + [int](333 * $bindScale))
-
-        Start-Sleep -Milliseconds 500
-
-        [System.Windows.Forms.SendKeys]::SendWait($devCode)
-
-        Start-Sleep -Milliseconds 400
-
-        [BdWin]::Click($geo.L + [int](344 * $bindScale), $geo.T + [int](388 * $bindScale))
-
-        Start-Sleep -Milliseconds 500
-
-        [System.Windows.Forms.SendKeys]::SendWait($password)
-
-        Start-Sleep -Milliseconds 400
-
-        [BdWin]::Click($geo.L + [int](300 * $bindScale), $geo.T + [int](443 * $bindScale))
-
-        Start-Sleep -Milliseconds 3000
-
-        # 提交后验证：重新截「设备」页 OCR，看本机主机名是否出现
-        $vbindShot = Join-Path $OutDir 'shot-bind2.png'
-
-        $vbgeo = Shot2 $vbindShot $geo
-
-        $script:BindState = 'unverified'
-
-        if ($vbgeo) {
-
-          $vbl = OcrImage $vbindShot
-
-          foreach ($ln in $vbl) { L ('  bind-vfy| ' + $ln.Text) }
-
-          $allTextV = (($vbl | ForEach-Object { $_.Text }) -join ' ').ToLower()
-
-          # 主机名同现 = ok；备注 cloud-desktop + 本机码同现同样 = ok
-          # （列表显示的是备注名而非主机名，只查主机名会永远 unverified）
-          $devCodeDigits = ($devCode -replace '[^0-9]', '')
-          if ($allTextV.Contains($hostName) -or
-              ($allTextV.Contains('cloud-desktop') -and $allTextV.Contains($devCodeDigits))) { $script:BindState = 'ok' }
-
-        }
-
-        L ('bind: verify state=' + $script:BindState)
-
-      }
+      L ('dev: add verify state=' + $script:BindState)
 
     }
 
     # 回「被控」页
-    [BdWin]::Click($geo.L + [int](65 * $bindScale), $geo.T + [int](560 * $bindScale))
-
+    [BdWin]::Click($geo.L + [int](60 * $bs), $geo.T + [int](552 * $bs))
     Start-Sleep -Milliseconds 1200
 
-  } catch { L ('bind flow failed: ' + $_.Exception.Message); $script:BindState = 'error' }
+  } catch { L ('dev flow failed: ' + $_.Exception.Message); $script:BindState = 'error' }
 
-} elseif ($devCode -and $password) {
+} elseif ($devCode -and $LoginUser) {
 
-  $script:BindState = 'skip-no-login'
+  $script:BindState = 'skip-no-login-state'
 
 }
 
@@ -1731,6 +1696,10 @@ $result = [ordered]@{
   account   = $LoginUser
 
   login     = if ($LoginUser) { if ($script:LoginState) { $script:LoginState } else { 'skipped' } } else { '' }
+
+  remark    = [string]$script:Remark
+
+  dev_clean = [string]$script:DevClean
 
   bind      = if ($LoginUser) { if ($script:BindState) { $script:BindState } else { 'skipped' } } else { '' }
 
