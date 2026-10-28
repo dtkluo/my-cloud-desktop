@@ -1179,7 +1179,12 @@ if ($FixedPassword -and $devCode) {
 
   } else {
 
-  # 铅笔图标：与眼睛同行（devY+105 中心），x≈545（600 基准）
+  # 铅笔图标：与眼睛同行（devY+105 中心），x≈545（600 基准，屏幕 757）。
+  # 2026-10-28 下午实测：流程全对但仍偶发 MISMATCH —— 弹窗留存（新密码框疑似
+  # 输入偶发丢失，提交被本地校验拒绝）。加就地读回验证 + 自动重试，最多 2 次。
+  for ($fx = 1; $fx -le 2; $fx++) {
+
+    L ('fixed password attempt ' + $fx)
 
   [BdWin]::Click($geo.L + [int](545 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
 
@@ -1213,13 +1218,60 @@ if ($FixedPassword -and $devCode) {
 
   Start-Sleep -Milliseconds 600
 
-  # 确定按钮
+  # 确定按钮 (300,415)
 
   [BdWin]::Click($geo.L + [int](300 * $scaleF), $geo.T + [int](415 * $scaleF))
 
   Start-Sleep -Milliseconds 2500
 
   L 'fixed password submitted'
+
+  # 就地读回验证：点眼睛重读，I/1 与 O 折叠比对
+  Start-Sleep -Milliseconds 1500
+
+  [BdWin]::Click($geo.L + [int](500 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
+
+  Start-Sleep -Milliseconds 2000
+
+  $fxShot = Join-Path $OutDir ('shot-fxv' + $fx + '.png')
+
+  $fxOk = $false
+
+  if (Shot $fxShot) {
+
+    $fxFold = { param($s) $s -replace '[I1]', 'l' -replace 'O', '0' }
+
+    foreach ($ln in (OcrImage $fxShot)) {
+
+      L ('  fxv-ocr| ' + $ln.Text)
+
+      $t = ($ln.Text -replace '[^A-Za-z0-9]', '')
+
+      if ($t.Length -ge 5 -and $t.Length -le 16 -and ((& $fxFold $t) -eq (& $fxFold $FixedPassword))) { $fxOk = $true; break }
+
+    }
+
+  }
+
+  # 点回去重新掩码（恢复进入前状态）
+
+  [BdWin]::Click($geo.L + [int](500 * $scaleF), $geo.T + [int](($devY + 105.0) * $scaleF))
+
+  Start-Sleep -Milliseconds 500
+
+  if ($fxOk) { L 'fixed password verified (in 2.5)'; break }
+
+  if ($fx -lt 2) {
+
+    L 'mismatch in 2.5, close dialog and retry'
+
+    [BdWin]::Click($geo.L + [int](431 * $scaleF), $geo.T + [int](203 * $scaleF))   # 弹窗 X
+
+    Start-Sleep -Milliseconds 1200
+
+  }
+
+  }   # end for fx
 
   }   # end else (old password known)
 
@@ -1612,7 +1664,11 @@ if ($devCode -and $password -and $LoginUser -and $script:LoginState -ne 'error' 
 
           $allTextV = (($vbl | ForEach-Object { $_.Text }) -join ' ').ToLower()
 
-          if ($allTextV.Contains($hostName)) { $script:BindState = 'ok' }
+          # 主机名同现 = ok；备注 cloud-desktop + 本机码同现同样 = ok
+          # （列表显示的是备注名而非主机名，只查主机名会永远 unverified）
+          $devCodeDigits = ($devCode -replace '[^0-9]', '')
+          if ($allTextV.Contains($hostName) -or
+              ($allTextV.Contains('cloud-desktop') -and $allTextV.Contains($devCodeDigits))) { $script:BindState = 'ok' }
 
         }
 
