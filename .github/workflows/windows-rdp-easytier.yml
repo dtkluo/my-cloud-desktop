@@ -141,6 +141,32 @@ jobs:
           }
           Write-Host "会话时长：$hours 小时"
 
+      - name: 1.5 BilldDesk 远控并行预部署（后台异步，不阻塞主链路）
+        shell: pwsh
+        run: |
+          # v9（2026-10-29）：bootstrap 原在步骤 7 内同步执行，BilldDesk 就绪总要
+          # 吃满全部前置步骤（实测开机到就绪 7 分钟，其中约 1.5 分钟纯等前置）。
+          # bootstrap 本体（虚拟声卡 + BilldDesk 安装 + 登录取码）不依赖
+          # RDP/EasyTier/AgentDock，唯一前提是 runneradmin 交互会话存在
+          # （runner 镜像自带自动登录，开机早期即就绪）。
+          # 此处在 checkout 后即后台拉起 bootstrap，与步骤 2-7 并行，省约 1.5-2 分钟。
+          Write-Host "===== 1.5 BilldDesk parallel bootstrap (background) ====="
+          $sessOk = $false
+          $waited = 0
+          for ($i = 0; $i -lt 60; $i++) {
+            $q = (quser 2>$null | Out-String)
+            if ($q -match 'runneradmin' -and ($q -match 'Active' -or $q -match 'Disc')) { $sessOk = $true; break }
+            Start-Sleep -Seconds 5
+            $waited += 5
+          }
+          Write-Host "runneradmin interactive session ready: $sessOk (waited ${waited}s)"
+          $out = "$env:RUNNER_TEMP\billddesk-bootstrap-out.log"
+          $err = "$env:RUNNER_TEMP\billddesk-bootstrap-err.log"
+          $p = Start-Process -FilePath 'pwsh' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','.github/scripts/billddesk-bootstrap.ps1' -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
+          Write-Host "bootstrap launched in background pid=$($p.Id)"
+          Write-Host "stdout log: $out"
+          Write-Host "stderr log: $err"
+
       - name: 2. 开启远程桌面（安全模式）
         shell: pwsh
         run: |
@@ -737,10 +763,30 @@ jobs:
           Write-Host "=========================================="
 
           # ---------- E1.5 + E2. virtual audio + BilldDesk remote control ----------
+          # v9：bootstrap 已在步骤 1.5 后台提前启动（与 RDP/EasyTier/AgentDock 并行），
+          # 此处只轮询其结果文件，不再同步执行安装。
           # User picked BilldDesk after comparing both (2026-10-28).
-          Write-Host "===== E1.5 + E2. BilldDesk remote control (runneradmin session) ====="
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/billddesk-bootstrap.ps1
-          Write-Host "billddesk-bootstrap.ps1 exit=$LASTEXITCODE"
+          Write-Host "===== E1.5 + E2. BilldDesk remote control (wait for background bootstrap) ====="
+          $bdJson = 'C:\billddesk-auto\billddesk.json'
+          $bdDeadline = (Get-Date).AddMinutes(8)
+          $bdGot = $null
+          while ((Get-Date) -lt $bdDeadline) {
+            if (Test-Path $bdJson) {
+              try {
+                $raw = Get-Content $bdJson -Raw -ErrorAction Stop
+                if ($raw -and $raw.Trim().Length -gt 10) { $bdGot = $raw | ConvertFrom-Json; break }
+              } catch { }
+            }
+            Start-Sleep -Seconds 10
+          }
+          if ($bdGot) {
+            Write-Host ("billddesk ready: state={0} code={1} pwd={2} login={3}" -f $bdGot.state, $bdGot.device_code, $bdGot.password, $bdGot.login)
+            if ($bdGot.state -ne 'ready') {
+              Write-Warning "billddesk state=$($bdGot.state)（非 ready），详情见 C:\billddesk-auto\bootstrap.log / agent.log"
+            }
+          } else {
+            Write-Warning "billddesk-bootstrap 未在 8 分钟内产出结果，请查看 C:\billddesk-auto\bootstrap.log 与 agent.log"
+          }
 
           # ---------- F. 保活（同一进程内看护，不跨步骤） ----------
           # v8.1：不再提前收尾，保活循环跑满 6 小时，到点由平台结束作业。
