@@ -141,16 +141,17 @@ jobs:
           }
           Write-Host "会话时长：$hours 小时"
 
-      - name: 1.5 BilldDesk 远控并行预部署（后台异步，不阻塞主链路）
+      - name: 1.5 BilldDesk 远控并行预部署（计划任务后台执行，不阻塞主链路）
         shell: pwsh
         run: |
           # v9（2026-10-29）：bootstrap 原在步骤 7 内同步执行，BilldDesk 就绪总要
-          # 吃满全部前置步骤（实测开机到就绪 7 分钟，其中约 1.5 分钟纯等前置）。
-          # bootstrap 本体（虚拟声卡 + BilldDesk 安装 + 登录取码）不依赖
-          # RDP/EasyTier/AgentDock，唯一前提是 runneradmin 交互会话存在
+          # 吃满全部前置步骤。bootstrap 本体（虚拟声卡 + BilldDesk 安装 + 登录取码）
+          # 不依赖 RDP/EasyTier/AgentDock，唯一前提是 runneradmin 交互会话存在
           # （runner 镜像自带自动登录，开机早期即就绪）。
-          # 此处在 checkout 后即后台拉起 bootstrap，与步骤 2-7 并行，省约 1.5-2 分钟。
-          Write-Host "===== 1.5 BilldDesk parallel bootstrap (background) ====="
+          # v9.1: use a scheduled task - Start-Process children die with the step's
+          # process tree (run 176); Task Scheduler processes survive across steps.
+          # Snapshot sync needs no STATE_TOKEN: step 7 keepalive re-reads billddesk.json.
+          Write-Host "===== 1.5 BilldDesk parallel bootstrap (scheduled task) ====="
           $sessOk = $false
           $waited = 0
           for ($i = 0; $i -lt 60; $i++) {
@@ -160,12 +161,15 @@ jobs:
             $waited += 5
           }
           Write-Host "runneradmin interactive session ready: $sessOk (waited ${waited}s)"
-          $out = "$env:RUNNER_TEMP\billddesk-bootstrap-out.log"
-          $err = "$env:RUNNER_TEMP\billddesk-bootstrap-err.log"
-          $p = Start-Process -FilePath 'pwsh' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','.github/scripts/billddesk-bootstrap.ps1' -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
-          Write-Host "bootstrap launched in background pid=$($p.Id)"
-          Write-Host "stdout log: $out"
-          Write-Host "stderr log: $err"
+          $bs = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\billddesk-bootstrap.ps1'
+          try { Unregister-ScheduledTask -TaskName 'BilldDeskBootstrap' -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+          $act = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "' + $bs + '"')
+          $pr  = New-ScheduledTaskPrincipal -UserId 'runneradmin' -LogonType Interactive -RunLevel Highest
+          $stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+          Register-ScheduledTask -TaskName 'BilldDeskBootstrap' -Action $act -Principal $pr -Settings $stg -Force | Out-Null
+          Start-ScheduledTask -TaskName 'BilldDeskBootstrap'
+          Start-Sleep -Seconds 3
+          Write-Host ('bootstrap task state: ' + (Get-ScheduledTask -TaskName 'BilldDeskBootstrap').State)
 
       - name: 2. 开启远程桌面（安全模式）
         shell: pwsh
