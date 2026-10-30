@@ -12,7 +12,7 @@
         否则 BilldDesk 采不到系统声音。
 #>
 param(
-  [string]$InstallerUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/billddesk-lab/BilldDesk_v0.623.0.exe',
+  [string]$InstallerUrl = 'https://github.com/dtkluo/my-cloud-desktop/releases/download/billddesk-lab/BilldDesk_v0.625.0.exe',
   [string]$WorkDir = 'C:\billddesk-auto',
   [string]$AgentUser = 'runneradmin',
   [int]$AgentTimeoutSec = 300,
@@ -114,7 +114,7 @@ Beat 'audio-done'
 
 # ---------------- 1. 安装 ----------------
 # 目标版本随 InstallerUrl 走；已装同版本就跳过，装的是旧版则升级。
-$targetVer = '0.623'
+$targetVer = '0.625'
 $needInstall = $true
 if (Test-Path $appExe) {
   $curVer = ''
