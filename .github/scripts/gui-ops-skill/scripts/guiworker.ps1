@@ -105,7 +105,9 @@ function Send-Mouse([uint32] $flags, [int] $dx, [int] $dy, [int] $wheel) {
     $mi.dx = $dx
     $mi.dy = $dy
     if ($wheel -lt 0) {
-        $mi.mouseData = [uint32]($wheel -band 0xFFFFFFFF)
+        # PS 5.1: 0xFFFFFFFF 是 int32 -1 ⇒ -600 -band -1 仍为 -600 ⇒ [uint32] 抛错，
+        # 滚轮因此从未真正发出（scroll 返回 ok:false）。用位转换拿二补码。
+        $mi.mouseData = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$wheel), 0)
     } else {
         $mi.mouseData = [uint32]$wheel
     }
