@@ -38,6 +38,11 @@ param(
 
   , [string]$DeviceRemark = ''
 
+  # 2026-11-04：自定义设备代码（需先在服务端注册过该码）。留空则跳过固定流程。
+  , [string]$CustomDeviceCode = '1504408660'
+
+  , [string]$CustomPassword = 'Ljs86822'
+
 )
 
 
@@ -180,6 +185,24 @@ public class BdWin {
     SetForegroundWindow(Main);
 
     AttachThreadInput(cur, tid, false);
+
+  }
+
+
+
+  public static void MoveTo(int x, int y) {
+
+    SetCursorPos(x, y);
+
+  }
+
+
+
+  // 滚轮：mouse_event 的 d 参数是 DWORD，C# 默认 unchecked，
+  // (uint)(-720) 会得到正确的二补码，因此可以直接传负数。
+  public static void Wheel(int delta) {
+
+    mouse_event(0x0800, 0, 0, (uint)delta, IntPtr.Zero);
 
   }
 
@@ -976,6 +999,104 @@ function Read-BdStore([string]$Path) {
   } catch { L ('store.hive read failed: ' + $_.Exception.Message) }
   return $r
 }
+# ---------- 2.8 自定义设备代码（GUI 设置，跨开机固定设备码） ----------
+# 2026-11-04 实测路径：设置 → 滚到底 → 自定义设置 → 自定义设备代码
+#   → 「登录」tab → 填已注册的码 + 8 位连接密码 → 确定，立即生效（写 store.hive）。
+# 注意：连接密码输入框硬限 8 位；设备代码框 8-10 位。
+# runner VM 每次开机全新（store.hive 重建、码由服务端重新分配），
+# 因此必须每次开机重设一次，否则设备码会变。
+# 坐标基于 600x600 窗口实测（窗口原点 212,60），按 $geo.W/600 缩放。
+function Set-CustomDeviceCode([string]$code, [string]$pwd) {
+
+  try {
+
+    if (-not $geo) { L 'custom: no geo, skip'; return $false }
+
+    $sf = $geo.W / 600.0
+
+    $ox = $geo.L
+
+    $oy = $geo.T
+
+    function Pt([int]$x, [int]$y) { return ,@([int]($ox + $x * $sf), [int]($oy + $y * $sf)) }
+
+    Add-Type -AssemblyName System.Windows.Forms
+
+    [BdWin]::Focus()
+
+    Start-Sleep -Milliseconds 900
+
+    # 1) 设置 tab
+    $p = Pt 528 557
+    [BdWin]::Click($p[0], $p[1])
+    Start-Sleep -Milliseconds 1700
+
+    # 2) 滚轮滑到底（设置列表默认只露出前 8 项）
+    $p = Pt 300 350
+    [BdWin]::MoveTo($p[0], $p[1])
+    for ($i = 0; $i -lt 3; $i++) {
+      [BdWin]::Wheel(-720)
+      Start-Sleep -Milliseconds 450
+    }
+
+    # 3) 自定义设置
+    $p = Pt 76 255
+    [BdWin]::Click($p[0], $p[1])
+    Start-Sleep -Milliseconds 1500
+
+    # 4) 自定义设备代码
+    $p = Pt 76 427
+    [BdWin]::Click($p[0], $p[1])
+    Start-Sleep -Milliseconds 1700
+
+    # 5) 登录 tab
+    $p = Pt 169 252
+    [BdWin]::Click($p[0], $p[1])
+    Start-Sleep -Milliseconds 900
+
+    # 6) 设备代码
+    $p = Pt 339 292
+    [BdWin]::Click($p[0], $p[1])
+    Start-Sleep -Milliseconds 400
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE 14}')
+    foreach ($c in $code.ToCharArray()) {
+      [System.Windows.Forms.SendKeys]::SendWait([string]$c)
+      Start-Sleep -Milliseconds 90
+    }
+    Start-Sleep -Milliseconds 300
+
+    # 7) 连接密码
+    $p = Pt 339 346
+    [BdWin]::Click($p[0], $p[1])
+    Start-Sleep -Milliseconds 400
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE 14}')
+    foreach ($c in $pwd.ToCharArray()) {
+      [System.Windows.Forms.SendKeys]::SendWait([string]$c)
+      Start-Sleep -Milliseconds 90
+    }
+    Start-Sleep -Milliseconds 400
+
+    # 8) 确定
+    $p = Pt 300 401
+    [BdWin]::Click($p[0], $p[1])
+    Start-Sleep -Milliseconds 3000
+
+    L ('custom: submitted ' + $code)
+
+    return $true
+
+  } catch {
+
+    L ('custom: failed ' + $_.Exception.Message)
+
+    return $false
+
+  }
+
+}
+
 $bdStore   = Read-BdStore $storeHive
 $storeCode = [string]$bdStore.uuid
 $storePwd  = [string]$bdStore.pwd
@@ -1301,6 +1422,42 @@ if (-not $password -and $FallbackPassword) {
 # （2026-10-29 已移除设备列表维护：残留条目不会出现在「同账号在线设备」里，
 #   备注也不再需要，流程只保留「登录 + 读设备码/密码」。）
 
+
+# ---------- 3.9 确保自定义设备代码（不一致则本机重设一次） ----------
+if ($CustomDeviceCode -and ($devCode -ne $CustomDeviceCode -or $password -ne $CustomPassword)) {
+
+  L ('custom: need fix, now=' + $devCode + '/' + $password + ' target=' + $CustomDeviceCode + '/' + $CustomPassword)
+
+  if (Set-CustomDeviceCode $CustomDeviceCode $CustomPassword) {
+
+    Start-Sleep -Milliseconds 1500
+
+    $bd2 = Read-BdStore $storeHive
+
+    if ($bd2.uuid) { $devCode = [string]$bd2.uuid; $devCodeSrc = 'store-after-custom' }
+
+    if ($bd2.pwd) { $password = [string]$bd2.pwd }
+
+    L ('custom: after=' + $devCode + '/' + $password)
+
+    # 回到被控页，保持界面处于可用状态
+    try {
+      $sf2 = $geo.W / 600.0
+      [BdWin]::Click([int]($geo.L + 68 * $sf2), [int]($geo.T + 557 * $sf2))
+      Start-Sleep -Milliseconds 1500
+    } catch { L ('custom: back-to-beikong failed ' + $_.Exception.Message) }
+
+  } else {
+
+    L 'custom: set failed, keep original code'
+
+  }
+
+} else {
+
+  if ($CustomDeviceCode) { L ('custom: already target (' + $devCode + ')') }
+
+}
 
 # ---------- 4. 落盘 ----------
 
