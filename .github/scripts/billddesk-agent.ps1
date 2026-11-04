@@ -942,6 +942,41 @@ foreach ($tx in @(65, 42, 88, 55)) {
 
 if (-not $bk) { L 'WARN: beikong tab unconfirmed after all x, continue anyway' }
 
+# ---------- 2.75 直读本地键值库取凭证（优先，免 OCR） ----------
+# 2026-11-04 实测（v0.630.0）：BillDesk 把被控端凭证明文存在
+#   C:\Windows\System32\config\systemprofile\AppData\Local\com.hsslive\BilldDesk\store.hive
+# 键名 deskUserUuid / deskUserPassword。该文件是键值序列化，用 28591(Latin1) 做
+# 1:1 字节映射读写不会破坏内容；实测取值与界面显示完全一致。
+# 走这条路的两个理由：
+#   1) OCR 会把数字 1 认成小写 l（V1vdU5tv -> VlvdU5tv），历史上「连接密码错误」
+#      就是这类误读造成的；直读没有歧义。
+#   2) 眼睛点击 + 两轮 OCR + 重拍平均多花 10~20 秒，直读是毫秒级。
+# 命中即跳过下面的眼睛/OCR 取值；未命中（文件缺失或格式变化）仍走原 OCR 兜底。
+$storeHive = 'C:\Windows\System32\config\systemprofile\AppData\Local\com.hsslive\BilldDesk\store.hive'
+function Read-BdStore([string]$Path) {
+  $r = @{ uuid = ''; pwd = '' }
+  try {
+    if (-not (Test-Path $Path)) { return $r }
+    $fs = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+      $b = New-Object byte[] $fs.Length
+      [void]$fs.Read($b, 0, $b.Length)
+    } finally { $fs.Close() }
+    $enc = [Text.Encoding]::GetEncoding(28591)
+    $s = $enc.GetString($b)
+    $m1 = [regex]::Match($s, 'deskUserUuid[\x00-\x20]{1,8}([0-9]{6,12})')
+    if ($m1.Success) { $r.uuid = $m1.Groups[1].Value }
+    $m2 = [regex]::Match($s, 'deskUserPassword[\x00-\x20]{1,8}([A-Za-z0-9]{6,16})')
+    if ($m2.Success) { $r.pwd = $m2.Groups[1].Value }
+  } catch { L ('store.hive read failed: ' + $_.Exception.Message) }
+  return $r
+}
+$bdStore   = Read-BdStore $storeHive
+$storeCode = [string]$bdStore.uuid
+$storePwd  = [string]$bdStore.pwd
+if ($storeCode) { L ('store.hive device code = ' + $storeCode) } else { L 'store.hive: no device code' }
+if ($storePwd)  { L ('store.hive password len = ' + $storePwd.Length) } else { L 'store.hive: no password' }
+
 $lines = OcrImage $shotPath
 
 foreach ($ln in $lines) { L ('  ocr| ' + $ln.Text) }
@@ -1032,7 +1067,7 @@ while ($devPageSeen -and $devPageTries -lt 2) {
 
 
 
-$devCode = ''
+$devCode = $storeCode
 
 $devY = -1.0
 
@@ -1083,9 +1118,9 @@ if ($devY -lt 0 -or $devY -lt 172 -or $devY -gt 240) {
 
 # ---------- 3. 像素定位眼睛图标并点击 ----------
 
-$password = ''
+$password = $storePwd
 
-if ($devCode -and $devY -ge 0) {
+if (-not $password -and $devCode -and $devY -ge 0) {
 
   # 密码行图标相对设备码行的偏移：600 基准下眼睛图标在 devY+95 ~ +116
 
