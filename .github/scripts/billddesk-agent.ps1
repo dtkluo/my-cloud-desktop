@@ -1441,8 +1441,12 @@ if ($CustomDeviceCode -and ($devCode -ne $CustomDeviceCode -or $password -ne $Cu
     L ('custom: after=' + $devCode + '/' + $password)
 
     # 回到被控页，保持界面处于可用状态
+    # 2026-11-04 实测：设置是二级页面，必须先点左上返回箭头再点底部被控 tab，
+    # 直接点 tab 无效（会停在「自定义设置」页）。
     try {
       $sf2 = $geo.W / 600.0
+      [BdWin]::Click([int]($geo.L + 31 * $sf2), [int]($geo.T + 60 * $sf2))
+      Start-Sleep -Milliseconds 1200
       [BdWin]::Click([int]($geo.L + 68 * $sf2), [int]($geo.T + 557 * $sf2))
       Start-Sleep -Milliseconds 1500
     } catch { L ('custom: back-to-beikong failed ' + $_.Exception.Message) }
