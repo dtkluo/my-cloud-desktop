@@ -1088,7 +1088,7 @@ $devY = -1.0
 
 foreach ($ln in $lines) {
 
-  if ($ln.Text -match '(\d{3})\s*(\d{3})\s*(\d{3})') {
+  if ($ln.Text -match '(\d{3})\s*(\d{3})\s*(\d{3})(?!\s*\d)') {
 
     if (-not $devCode) { $devCode = $Matches[1] + $Matches[2] + $Matches[3] }
 
@@ -1106,7 +1106,7 @@ if (-not $devCode) {
 
     $digits = ($ln.Text -replace '[^0-9]', '')
 
-    if ($digits.Length -eq 9) { $devCode = $digits; $devY = [double]$ln.Y; break }
+    if ($digits.Length -eq 9 -or $digits.Length -eq 10) { $devCode = $digits; $devY = [double]$ln.Y; break }
 
   }
 
@@ -1312,7 +1312,7 @@ $result = [ordered]@{
               elseif ($devCode -and $password) { 'degraded-login' }
               elseif ($devCode) { 'no-password' } else { 'no-device-code' }
 
-  device_code = if ($devCode) { ($devCode.Substring(0,3) + ' ' + $devCode.Substring(3,3) + ' ' + $devCode.Substring(6,3)) } else { '' }
+  device_code = if ($devCode) { ($devCode -replace '(\d{3})(?=\d)', '$1 ') } else { '' }
 
   device_uuid = $devCode
 
