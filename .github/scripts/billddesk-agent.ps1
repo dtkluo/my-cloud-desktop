@@ -964,17 +964,22 @@ function Read-BdStore([string]$Path) {
     } finally { $fs.Close() }
     $enc = [Text.Encoding]::GetEncoding(28591)
     $s = $enc.GetString($b)
-    $m1 = [regex]::Match($s, 'deskUserUuid[\x00-\x20]{1,8}([0-9]{6,12})')
-    if ($m1.Success) { $r.uuid = $m1.Groups[1].Value }
-    $m2 = [regex]::Match($s, 'deskUserPassword[\x00-\x20]{1,8}([A-Za-z0-9]{6,16})')
-    if ($m2.Success) { $r.pwd = $m2.Groups[1].Value }
+    # 2026-11-04：设置「自定义设备代码」之后，store.hive 里会同时保留旧记录与新记录
+    # （实测 3 条：旧 x2 + 新 x1）。Hive 是追加写，**最后一条才是当前生效值**。
+    # 取第一条会读到自定义之前的旧码，因此这里一律取 LAST 匹配。
+    $ms1 = [regex]::Matches($s, 'deskUserUuid[\x00-\x20]{1,8}([0-9]{6,12})')
+    if ($ms1.Count -gt 0) { $r.uuid = $ms1[$ms1.Count - 1].Groups[1].Value }
+    $r.uuidN = $ms1.Count
+    $ms2 = [regex]::Matches($s, 'deskUserPassword[\x00-\x20]{1,8}([A-Za-z0-9]{6,16})')
+    if ($ms2.Count -gt 0) { $r.pwd = $ms2[$ms2.Count - 1].Groups[1].Value }
+    $r.pwdN = $ms2.Count
   } catch { L ('store.hive read failed: ' + $_.Exception.Message) }
   return $r
 }
 $bdStore   = Read-BdStore $storeHive
 $storeCode = [string]$bdStore.uuid
 $storePwd  = [string]$bdStore.pwd
-if ($storeCode) { L ('store.hive device code = ' + $storeCode) } else { L 'store.hive: no device code' }
+if ($storeCode) { L ('store.hive device code = ' + $storeCode + ' (rec#' + $bdStore.uuidN + ')') } else { L 'store.hive: no device code' }
 if ($storePwd)  { L ('store.hive password len = ' + $storePwd.Length) } else { L 'store.hive: no password' }
 
 $lines = OcrImage $shotPath
