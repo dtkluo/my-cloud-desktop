@@ -1067,7 +1067,17 @@ while ($devPageSeen -and $devPageTries -lt 2) {
 
 
 
+# 2026-11-04 修订：直读命中后禁止 OCR 覆盖设备码。
+# 原因：store.hive 与界面同源、是权威值；OCR 有 0/6、1/l、8/B 混淆史（同日实测
+# 把标题栏 v0.630.0 读成 VO.6700.O）。旧逻辑只要 OCR 命中"三个三位数字"就无条件
+# 覆盖 $devCode，一旦误读就会把错误设备码写进状态文件并推到手机端。
+# 现在 OCR 只负责提供 devY（眼睛/密码行的定位锚点），设备码一律以直读为准；
+# 只有直读拿不到（文件缺失或格式变更）时才退回 OCR。
 $devCode = $storeCode
+
+$devCodeSrc = 'store'
+
+if (-not $storeCode) { $devCodeSrc = 'ocr' }
 
 $devY = -1.0
 
@@ -1075,7 +1085,7 @@ foreach ($ln in $lines) {
 
   if ($ln.Text -match '(\d{3})\s*(\d{3})\s*(\d{3})') {
 
-    $devCode = $Matches[1] + $Matches[2] + $Matches[3]
+    if (-not $devCode) { $devCode = $Matches[1] + $Matches[2] + $Matches[3] }
 
     $devY = [double]$ln.Y
 
@@ -1097,7 +1107,7 @@ if (-not $devCode) {
 
 }
 
-L ("devCode=" + $devCode + " devY=" + $devY)
+L ("devCode=" + $devCode + " devY=" + $devY + " src=" + $devCodeSrc)
 
 # 2026-10-28 下午根因：OCR 给出的行 Y 偶发偏小 40px 上下（截图重试期间窗口在动画，
 # 拿到的是上一帧/缩放图的 bbox）。devY 一旦偏小，2.5 节的眼睛点击坐标与密码行
@@ -1116,7 +1126,10 @@ if ($devY -lt 0 -or $devY -lt 172 -or $devY -gt 240) {
 # （2026-10-29 已移除固定密码逻辑：主人改用「同账号在线设备」直连，不再需要恒定密码。）
 
 
-# ---------- 3. 像素定位眼睛图标并点击 ----------
+# ---------- 3. 取密码：明文直读优先，OCR 仅作 FALLBACK ----------
+# 下面 if 分支是直读失败时的兜底路径（点眼睛 → 截密码行 → OCR → 重拍复核），
+# 直读命中时整段不执行、零耗时。保留它是为了 store.hive 的路径或键名被作者
+# 改动时不至于彻底失明。2026-11-04 实测：直读 ≈0ms，兜底路径 ≈10~20s。
 
 $password = $storePwd
 
