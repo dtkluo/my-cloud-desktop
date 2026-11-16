@@ -20,10 +20,10 @@ param(
   # 连接密码必须恒定：dtka1 账号下的「设备绑定」是按 设备码+密码 在服务端校验的，
   # 每次开机换密码会让绑定变成「失效」（2026-10-27 实测）。固定后开机 agent 会幂等地
   # 重设成同一值，服务端绑定始终有效，手机主控端可同账号直连。
-  [string]$ConnectPassword = 'lZfQZFjl',
+  [string]$ConnectPassword = 'Ljs.3038',
   # 主控端自动登录账号（同账号直连用）
   [string]$AccountUser = 'dtka1',
-  [string]$AccountPass = 'ljs8682268'
+  [string]$AccountPass = 'Ljs.8682268'
 )
 
 $ErrorActionPreference = 'Continue'
