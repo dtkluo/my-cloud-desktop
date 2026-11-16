@@ -993,7 +993,9 @@ function Read-BdStore([string]$Path) {
     $ms1 = [regex]::Matches($s, 'deskUserUuid[\x00-\x20]{1,8}([0-9]{6,12})')
     if ($ms1.Count -gt 0) { $r.uuid = $ms1[$ms1.Count - 1].Groups[1].Value }
     $r.uuidN = $ms1.Count
-    $ms2 = [regex]::Matches($s, 'deskUserPassword[\x00-\x20]{1,8}([A-Za-z0-9]{6,16})')
+    # 2026-11-16：字符类必须覆盖密码实际用到的字符。原先只有 [A-Za-z0-9]，
+    # 导致含点号的密码（如 Ljs.3038）被截断成 3 位而整条跳过，取到更早的旧值。
+    $ms2 = [regex]::Matches($s, 'deskUserPassword[\x00-\x20]{1,8}([A-Za-z0-9._\-]{6,16})')
     if ($ms2.Count -gt 0) { $r.pwd = $ms2[$ms2.Count - 1].Groups[1].Value }
     $r.pwdN = $ms2.Count
   } catch { L ('store.hive read failed: ' + $_.Exception.Message) }
@@ -1389,7 +1391,7 @@ if (-not $password -and $devCode -and $devY -ge 0) {
     $ocrPwd = ''
     foreach ($ln in $l2) {
       if ($ln.Y -lt ($devY + 50) -or $ln.Y -gt ($devY + 165)) { continue }
-      $t = ($ln.Text -replace '[^A-Za-z0-9]', '')
+      $t = ($ln.Text -replace '[^A-Za-z0-9._-]', '')
       if ($t.Length -ge 5 -and $t.Length -le 16 -and $t -ne $devCode) { $ocrPwd = $t; break }
     }
     L ('password(from ocr)=' + $ocrPwd)
@@ -1430,9 +1432,24 @@ if ($CustomDeviceCode -and ($devCode -ne $CustomDeviceCode -or $password -ne $Cu
 
   if (Set-CustomDeviceCode $CustomDeviceCode $CustomPassword) {
 
-    Start-Sleep -Milliseconds 1500
+    # 2026-11-16：提交后 hive 落盘有延迟，单次等 1.5s 会读到旧值（实测把新密码上报成了旧密码）。
+    # 改为最多 10 次 × 1.2s 轮询，直到读到「目标码 + 目标密码」为止。
+    $bd2 = $null
 
-    $bd2 = Read-BdStore $storeHive
+    for ($w = 1; $w -le 10; $w++) {
+
+      Start-Sleep -Milliseconds 1200
+
+      $bd2 = Read-BdStore $storeHive
+
+      $cu = [string]$bd2.uuid
+      $cp = [string]$bd2.pwd
+
+      if (($cu -eq $CustomDeviceCode) -and ($cp -eq $CustomPassword)) { L ('custom: verify ok after poll ' + $w); break }
+
+      L ('custom: poll ' + $w + ' now=' + $cu + '/' + $cp)
+
+    }
 
     if ($bd2.uuid) { $devCode = [string]$bd2.uuid; $devCodeSrc = 'store-after-custom' }
 
