@@ -16,7 +16,9 @@ param(
   [string]$WorkDir = 'C:\billddesk-auto',
   [string]$AgentUser = 'runneradmin',
   [int]$AgentTimeoutSec = 300,
-  [string]$FallbackPassword = 'r9R479JO',
+  # 2026-11-16 置空：读不到密码时不再上报假值，交给 agent 的「确保自定义码」流程兜底重设；
+  # 非空值会在重设失败时被原样写进 billddesk.json 的 password 字段，卡片会显示一个错误密码。
+  [string]$FallbackPassword = '',
   # 连接密码必须恒定：dtka1 账号下的「设备绑定」是按 设备码+密码 在服务端校验的，
   # 每次开机换密码会让绑定变成「失效」（2026-10-27 实测）。固定后开机 agent 会幂等地
   # 重设成同一值，服务端绑定始终有效，手机主控端可同账号直连。
