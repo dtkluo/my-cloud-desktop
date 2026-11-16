@@ -41,7 +41,7 @@ param(
   # 2026-11-04：自定义设备代码（需先在服务端注册过该码）。留空则跳过固定流程。
   , [string]$CustomDeviceCode = '1504408660'
 
-  , [string]$CustomPassword = 'Ljs86822'
+  , [string]$CustomPassword = 'Ljs.3038'
 
 )
 
