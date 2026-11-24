@@ -78,25 +78,47 @@ try {
 # 直接报 "invalid JSON input: Unexpected UTF-8 BOM"。
 # ⇒ 改为：JSON 以 ASCII 落盘，再用 cmd 重定向喂 stdin（原始字节，不带 BOM）。
 function Invoke-Skill {
-    param([string] $Action, [hashtable] $Extra = @{})
+    param([string] $Action, [hashtable] $Extra = @{}, [int] $TimeoutMs = 30000)
     $payload = @{ skill_action = $Action }
     foreach ($k in $Extra.Keys) { $payload[$k] = $Extra[$k] }
     $stdinJson = $payload | ConvertTo-Json -Compress -Depth 5
-    $tag    = [guid]::NewGuid().ToString('N')
-    $tmpIn  = Join-Path $env:TEMP ("gyin_$tag.json")
-    $tmpOut = Join-Path $env:TEMP ("gyout_$tag.txt")
-    [IO.File]::WriteAllText($tmpIn, $stdinJson, [Text.Encoding]::ASCII)
+
+    # [2026-11-25 修复 — run#221 整轮卡死]
+    # 原实现是「同步无限等待」：run.py 一旦卡住（实测：与 guac/webtor 的 GB 级镜像
+    # 下载重叠时，python 启动本身被拖住），PowerShell 就永远等下去 —— 步骤 5.6 挂了
+    # 10 分钟，连 cancel 都要 5 分钟才生效，后续 6 / 6.9 / 7 全部不执行，
+    # 结果就是云桌面完全不可连接（EasyTier 根本没起来）。
+    # 改为 Process + WaitForExit(ms) 硬超时：超时即 Kill 并返回 ok=$false，
+    # 由调用方按「检测失败」处理 —— 5.6 本来只是可选检测，不该阻塞主链路。
+    # 顺带去掉 stdin 临时文件：直接写 StandardInput，BOM 问题从根上消失。
     try {
-        & cmd.exe /c "`"$py`" -X utf8 `"$SkillRun`" < `"$tmpIn`" > `"$tmpOut`" 2>&1" | Out-Null
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = $py
+        $psi.Arguments              = "-X utf8 `"$SkillRun`""
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardInput  = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        try { $psi.StandardInputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+        $prc = [System.Diagnostics.Process]::Start($psi)
+        $prc.StandardInput.Write($stdinJson)
+        $prc.StandardInput.Close()
+        $outTask = $prc.StandardOutput.ReadToEndAsync()
+        $errTask = $prc.StandardError.ReadToEndAsync()
+        if (-not $prc.WaitForExit($TimeoutMs)) {
+            try { $prc.Kill() } catch { }
+            return @{ ok = $false; error = "skill ${Action} 超时 ${TimeoutMs}ms（已强制终止）" }
+        }
+        $raw = ''
+        try { $raw = $outTask.Result } catch { $raw = '' }
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            try { $raw = $errTask.Result } catch { $raw = '' }
+        }
     } catch {
-        Remove-Item $tmpIn -Force -ErrorAction SilentlyContinue
         return @{ ok = $false; error = $_.Exception.Message }
     }
-    $raw = ''
-    if (Test-Path -LiteralPath $tmpOut) {
-        try { $raw = Get-Content -LiteralPath $tmpOut -Raw -Encoding UTF8 } catch { $raw = '' }
-    }
-    Remove-Item $tmpIn, $tmpOut -Force -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($raw)) { return @{ ok = $false; error = '无输出' } }
     if ([string]::IsNullOrWhiteSpace($raw)) { return @{ ok = $false; error = '无输出' } }
     $i = $raw.IndexOf('{'); $j = $raw.LastIndexOf('}')
     if ($i -lt 0 -or $j -lt $i) { return @{ ok = $false; error = '输出不是 JSON'; raw = $raw } }
@@ -153,7 +175,7 @@ if ($st.ok -and $st.has_credential) {
 # ---------- 2) 有进行中的设备码？ ----------
 if ($st.login_state -eq 'awaiting') {
     Write-Host '[gy] 存在进行中的设备码，尝试领取'
-    $pr = Invoke-Skill 'login_poll' @{ timeout = [Math]::Min(110, $PollSeconds) }
+    $pr = Invoke-Skill 'login_poll' @{ timeout = [Math]::Min(110, $PollSeconds) } -TimeoutMs (([Math]::Min(110, $PollSeconds) + 30) * 1000)
     if ($pr.ok -and ($pr.state -eq 'authorized' -or $pr.access_token)) {
         $st2 = Invoke-Skill 'status'
         Write-Host "[gy] 领取成功 device_id=$($st2.device_id)"
@@ -201,7 +223,7 @@ if ($RegisterRepeating -and $TaskName) {
 # ---------- 5) 就地等待批准 ----------
 if ($PollSeconds -gt 0) {
     Write-Host "[gy] 就地等待批准 ${PollSeconds}s ..."
-    $pr2 = Invoke-Skill 'login_poll' @{ timeout = $PollSeconds }
+    $pr2 = Invoke-Skill 'login_poll' @{ timeout = $PollSeconds } -TimeoutMs (($PollSeconds + 30) * 1000)
     if ($pr2.ok -and ($pr2.state -eq 'authorized' -or $pr2.access_token)) {
         $st3 = Invoke-Skill 'status'
         Write-Host "[gy] 领取成功 device_id=$($st3.device_id)"
