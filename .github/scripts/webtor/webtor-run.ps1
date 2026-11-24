@@ -1,14 +1,17 @@
 ﻿<#
 .SYNOPSIS
-    真正执行 webtor WSL Docker 热部署，并把结果写进状态文件供手机端展示。
+    真正执行 webtor WSL Docker 部署，并把结果写进状态文件供手机端展示。
 
 .DESCRIPTION
-    由 webtor-schedule.ps1（开机勾选）或 webtor-command.ps1（按需命令）调用。
+    由 webtor-schedule.ps1（开机勾选 / 按需命令）调用。
     本脚本只负责「执行一次 + 记状态」，去重由调用方负责。
-    部署本体是可重复的 deploy-webtor.ps1：镜像/卷已存在时全部跳过，实测 0.4 分钟。
+    部署本体是可重复的 deploy-webtor.ps1：镜像/卷已存在时全部跳过。
 
-.NOTES
-    STATE_TOKEN 必须存在（部署完会立刻补推一次状态到手机端）。
+    密码与身份透传（2026-11-24）：
+      -AdminPw 必须显式传下去，否则 deploy-webtor.ps1 会随机生成一个密码，
+      手机端登录就跟预期对不上；没有 webtor.env 文件时尤其容易被忽略。
+      -RdpUser/-RdpPass 用于 deploy 里注册 WebtorProxy 任务 —— 那个代理进程同样要
+      能看到 rdpadmin 的 WSL，否则端口转发起不来（表现为 502）。
 #>
 [CmdletBinding()]
 param(
@@ -16,7 +19,12 @@ param(
     [string] $RequestId  = '',
     [string] $RunId      = '',
     [string] $StateRepo  = '',
-    [string] $StatePath  = ''
+    [string] $StatePath  = '',
+    [string] $RdpUser    = 'rdpadmin',
+    [string] $RdpPass    = '',
+    [string] $AdminPw    = '',
+    [string] $Vip        = '',
+    [int]    $Port       = 8081
 )
 
 $ErrorActionPreference = 'Continue'
@@ -28,6 +36,9 @@ $logFile    = Join-Path $WorkDir 'deploy.log'
 $scripts    = Split-Path $PSScriptRoot -Parent
 $deploy     = Join-Path $PSScriptRoot 'deploy-webtor.ps1'
 $publisher  = Join-Path $scripts 'publish-agentdock-state.ps1'
+
+if (-not $Vip) { $Vip = $env:ET_VIRTUAL_IP }
+if (-not $Vip) { $Vip = '192.168.110.88' }
 
 function Write-WebtorStatus {
     param(
@@ -48,7 +59,6 @@ function Write-WebtorStatus {
         detail      = $Extra
     }
     [IO.File]::WriteAllText($statusFile, ($obj | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
-    # 每次状态变化都补推一次，手机端 30 秒轮询即可看到，不必等下一分钟保活同步
     if ($StateRepo -and $env:STATE_TOKEN -and (Test-Path -LiteralPath $publisher)) {
         try {
             & $publisher -StateRepo $StateRepo -StatePath $StatePath -WebtorStateFile $statusFile | Out-Null
@@ -58,17 +68,18 @@ function Write-WebtorStatus {
     }
 }
 
-Write-WebtorStatus -State 'building' -Message 'WSL Docker 热部署中（首次约 2-3 分钟）'
+Write-WebtorStatus -State 'building' -Message 'WSL Docker 部署中（首次需拉镜像，约 3-8 分钟）'
 
 $t0 = Get-Date
-& $deploy *> $logFile
+& $deploy -Port $Port -Vip $Vip -AdminPw $AdminPw -KitDir $PSScriptRoot `
+    -RdpUser $RdpUser -RdpPass $RdpPass *> $logFile
 $rc = $LASTEXITCODE
 $mins = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
 
 if ($rc -eq 0) {
-    $url = "http://192.168.110.88:8081"
+    $url = "http://${Vip}:$Port"
     Write-WebtorStatus -State 'ready' -Url $url `
-        -Message "部署完成（${mins} 分钟，登录页 HTTP 200）"
+        -Message "部署完成（${mins} 分钟）"
 } else {
     $tail = ''
     if (Test-Path -LiteralPath $logFile) {
