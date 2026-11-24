@@ -466,6 +466,15 @@ jobs:
             -RunId $env:GITHUB_RUN_ID `
             -RdpUser $env:RDP_USER -RdpPass $env:RDP_PASS -AdminPw $env:WEBTOR_ADMIN_PW
           Write-Host ("webtor 调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
+      # [v11] 路由守卫：EasyTier 的 TUN 会挂一条 metric 9005 的 0.0.0.0/0。
+      # 托管 runner 的物理网卡 metric 每次开机都可能不同，一旦 TUN 胜出，到 GitHub /
+      # Cloudflare 的流量就被吸进虚拟网卡形成回环 → 整机失联、所有服务起不来
+      # （2026-11-24 21:00 实证：步骤 15 开始后 job 再无上报，MCP 530 + VIP 不通）。
+      # 这里在 EasyTier 启动前把物理网卡 metric 钉死；步骤 15 内的 C2 自检仍保留作兜底。
+      - name: 6.9 EasyTier 路由守卫（固定物理网卡 metric，防 TUN 抢默认路由）
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File ./.github/scripts/easytier-route-guard.ps1 -Phase pre
       # ======================================================================
       # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 基线自检 -> 就绪校验 ->
       #   门户自检 -> 保活，单步骤持有 easytier-core，避免核心进程跨步骤被回收。
@@ -641,25 +650,6 @@ jobs:
             Write-Host "（NetNat 检查跳过：$($_.Exception.Message)）"
           }
 
-          # ---------- B2. [v11] 固定物理网卡 metric，从根上防止 TUN 抢默认路由 ----------
-          # EasyTier 的 TUN 会挂一条 metric 9005 的 0.0.0.0/0。只要它的优先级高于物理网卡，
-          # runner 到 GitHub / Cloudflare 的流量就会被吸进虚拟网卡形成回环 → 整机失联
-          # （2026-11-24 21:00 那次重启实证：步骤 15 开始后 job 再无任何上报，
-          #   MCP 530 + VIP 不通 + 状态文件冻结，服务一个都起不来）。
-          # 托管 runner 的物理网卡 metric 每次开机都可能不同，所以必须在这里显式钉死，
-          # 不能依赖 "物理网卡通常更优" 这个假设。
-          try {
-            $eg0 = Get-EgressInfo -Target '8.8.8.8'
-            if ($eg0) {
-              Set-NetIPInterface -InterfaceIndex $eg0.Index -AddressFamily IPv4 -InterfaceMetric 10 -ErrorAction Stop
-              Write-Host "已固定物理网卡 $($eg0.Alias) (ifIndex=$($eg0.Index)) 的 IPv4 metric=10"
-            } else {
-              Write-Host "（未能判定物理网卡，跳过 metric 固定）"
-            }
-          } catch {
-            Write-Host "（固定网卡 metric 跳过：$($_.Exception.Message)）"
-          }
-
           # ---------- C. 启动 EasyTier（v8：仅 SOCKS5 门户，无出口节点/KCP 代理） ----------
           Write-Host ""
           Write-Host "===== C. 启动 EasyTier（纯 SOCKS5 门户）====="
@@ -674,20 +664,6 @@ jobs:
                     -RedirectStandardOutput $outLog -RedirectStandardError $errLog
           Write-Host "PID：$($proc.Id)"
           Set-CorePriority
-          # [v11] 启动后立刻清掉 TUN 上的 0.0.0.0/0，不等 C2。
-          # Send-Heartbeat 里的联网检查（Test-NetConnection）在断网状态下会阻塞很久，
-          # 若等它跑完再修路由，runner 可能已经被平台判定失联。v8 已无 exit node，
-          # 这条默认路由对我们是纯负担，删掉没有任何功能损失。
-          for ($k = 0; $k -lt 3; $k++) {
-            $tunNow = @(Get-TunIndex)
-            if (-not $tunNow) { break }
-            foreach ($idx2 in $tunNow) {
-              try { Remove-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $idx2 -Confirm:$false -ErrorAction Stop } catch { }
-            }
-            Start-Sleep -Milliseconds 700
-          }
-          $egAfter = Get-EgressInfo -Target '8.8.8.8'
-          if ($egAfter) { Write-Host "清理后访问 8.8.8.8 的出接口：$($egAfter.Alias) (ifIndex=$($egAfter.Index))" }
           Send-Heartbeat 'startup'
 
           # ---------- C2. 运行器自身出网基线自检（v8 新增，唯一致命项） ----------
