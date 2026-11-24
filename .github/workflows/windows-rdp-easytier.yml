@@ -216,6 +216,100 @@ jobs:
           Set-Content -LiteralPath $passFile -Value $password -Encoding ASCII -NoNewline
           Write-Host "已保存密码到 $passFile"
 
+      # ======================================================================
+      # [v10 新增] 网页端 RDP（Apache Guacamole）—— 异步部署，不进关键路径。
+      # [v12 调整] 位置从原 6.5 提到步骤 3 之后（3.5a）。
+      #
+      # why v12（2026-11-25，依据 run#220 实测时间线）：
+      #   原来 6.5/6.6 排在 5.5 之后，而 5.5 是**同步阻塞**的（实测 38s：
+      #   00:30:31 → 00:31:09）。guac-bootstrap 直到 00:31:16 才被下发，
+      #   而它的全部工作（装 WSL 发行版 + 装 Docker + 拉 guac 镜像 + 起容器）
+      #   只要约 2 分钟 —— 也就是说这 43 秒纯粹在排队，没有任何依赖在等它。
+      #   前移到步骤 3 之后，WSL/Docker 冷启动与 5.5 provisioning、5.2、6
+      #   完全并发，guac 与 webtor 的就绪时刻各提前约 40s。
+      #   注意这不是「预拉镜像」：webtor 部署脚本本来就在 Docker 就绪的瞬间
+      #   开始 pull，真正的浪费是它开始轮询的时间点被推迟了。
+      #
+      # 前置条件（步骤 3 已满足，位置再往前提就不安全了）：
+      #   rdpadmin 账号已创建、密码已落盘到 C:\agentdock-install\rdp-password.txt。
+      #   不依赖 AgentDock / EasyTier / 远程桌面 / provisioning 的任何产物。
+      #
+      # 配套改动（必须一起生效，否则早启动会踩坑）：
+      #   deploy-webtor.ps1 去掉了 .wslconfig 变更触发的 wsl --shutdown ——
+      #   提前启动后 webtor 可能在 guac 正拉镜像时判定 cfgDirty 并关掉 VM。
+      #   保活改由 WSL-KeepAlive 常驻会话承担（vmIdleTimeout 在 WSL 3.0.5 本就不生效）。
+      #
+      # 为什么必须异步：
+      #   本步骤如果同步执行，5-8 分钟的 WSL + Docker 冷启动会把**步骤 7 推迟**，
+      #   而步骤 7 才真正拉起 EasyTier —— 等于「能连得上」本身慢 5-8 分钟。
+      #   所以这里只注册一个 5 秒后执行的一次性计划任务就返回（实测 <3s），
+      #   Guacamole 在后台自己装，装完自己把 guac.url 补推到手机端。
+      #   ⇒ 开机到可连的时间与引入本功能之前完全一致（增量 ≈ 0）。
+      #
+      # 前置依赖（同目录已提交）：
+      #   .github/scripts/guac/guac-schedule.ps1   本步骤调用
+      #   .github/scripts/guac/guac-bootstrap.ps1  后台真正干活的（也可放 scripts 根）
+      #   .github/scripts/guac/guac-deploy.sh      WSL 侧部署模板
+      #   .github/scripts/publish-agentdock-state.ps1 需支持 guac 段（已改）
+      #
+      # 需要的 secrets：RDP_PASSWORD（已有）、GUAC_WEB_PASS（网页登录密码，可选，缺省同 RDP 密码）
+      # 可选加速：把 guac-images.tar.gz 传 Release 后，在 env 里填 GUAC_IMAGE_BUNDLE
+      # ======================================================================
+      - name: 3.5a 网页端 RDP 后台调度（提前下发，与 5.5 provisioning 并行）
+        if: ${{ github.event.inputs.agentdock != 'disabled' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: pwsh
+        env:
+          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          GUAC_PASS: ${{ secrets.GUAC_WEB_PASS }}
+          GUAC_IMAGE_BUNDLE: ${{ vars.GUAC_IMAGE_BUNDLE }}
+        run: |
+          $user = if ($env:RDP_USER) { $env:RDP_USER } else { 'rdpadmin' }
+          $pass = $env:RDP_PASS
+          if (-not $pass -and (Test-Path 'C:\agentdock-install\rdp-password.txt')) {
+            $pass = (Get-Content 'C:\agentdock-install\rdp-password.txt' -Raw).Trim()
+          }
+          if (-not $pass) { Write-Warning '拿不到 rdpadmin 密码，跳过网页端部署'; exit 0 }
+          $gp = if ($env:GUAC_PASS) { $env:GUAC_PASS } else { $pass }
+
+          $t0 = Get-Date
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/guac/guac-schedule.ps1 `
+            -RdpUser $user -RdpPass $pass -GuacPass $gp `
+            -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
+            -ImageBundle $env:GUAC_IMAGE_BUNDLE
+          Write-Host ("调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
+
+      # ----------------------------------------------------------------------
+      # 3.5b webtor 按需部署（默认关闭；仅当手机端勾选「启动云桌面时一并部署」）
+      # 与 3.5a 同款套路：只注册一次性任务就返回，部署本体在后台跑，
+      # 完成/失败都会由 webtor-run.ps1 写状态并补推到手机端。
+      # [v12] 同 3.5a 一起前移；webtor 的「等发行版 → 等 Docker → pull → 起容器」
+      # 自带轮询，提前下发后它会在后台安静地等到 Docker 可用，不会空转失败。
+      # ----------------------------------------------------------------------
+      - name: 3.5b webtor 后台调度（勾选才执行，提前下发）
+        if: ${{ github.event.inputs.deploy_webtor == 'enabled' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: pwsh
+        env:
+          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          # 部署任务必须以 rdpadmin 身份注册：Ubuntu-24.04 的 WSL 注册在它的 HKCU 下，
+          # 用 runneradmin/S4U 跑会看不到发行版（2026-11-24 首次上线即因此失败）。
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          # webtor 管理员密码；配了 secret 就以 secret 为准，未配时用交付默认值
+          WEBTOR_ADMIN_PW: ${{ secrets.WEBTOR_ADMIN_PW || '.PK.8682268' }}
+        run: |
+          $t0 = Get-Date
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/webtor/webtor-schedule.ps1 `
+            -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
+            -RunId $env:GITHUB_RUN_ID `
+            -RdpUser $env:RDP_USER -RdpPass $env:RDP_PASS -AdminPw $env:WEBTOR_ADMIN_PW
+          Write-Host ("webtor 调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
+
       - name: 4. 下载并安装 EasyTier（含参数能力自检）
         shell: pwsh
         env:
@@ -395,77 +489,6 @@ jobs:
             -SessionHours $hours `
             -Port 8765
 
-      # ======================================================================
-      # [v10 新增] 网页端 RDP（Apache Guacamole）—— 异步部署，不进关键路径。
-      #
-      # 为什么必须异步：
-      #   本步骤如果同步执行，5-8 分钟的 WSL + Docker 冷启动会把**步骤 7 推迟**，
-      #   而步骤 7 才真正拉起 EasyTier —— 等于「能连得上」本身慢 5-8 分钟。
-      #   所以这里只注册一个 5 秒后执行的一次性计划任务就返回（实测 <3s），
-      #   Guacamole 在后台自己装，装完自己把 guac.url 补推到手机端。
-      #   ⇒ 开机到可连的时间与引入本功能之前完全一致（增量 ≈ 0）。
-      #
-      # 前置依赖（同目录已提交）：
-      #   .github/scripts/guac/guac-schedule.ps1   本步骤调用
-      #   .github/scripts/guac/guac-bootstrap.ps1  后台真正干活的（也可放 scripts 根）
-      #   .github/scripts/guac/guac-deploy.sh      WSL 侧部署模板
-      #   .github/scripts/publish-agentdock-state.ps1 需支持 guac 段（已改）
-      #
-      # 需要的 secrets：RDP_PASSWORD（已有）、GUAC_WEB_PASS（网页登录密码，可选，缺省同 RDP 密码）
-      # 可选加速：把 guac-images.tar.gz 传 Release 后，在 env 里填 GUAC_IMAGE_BUNDLE
-      # ======================================================================
-      - name: 6.5 网页端 RDP 后台部署（不阻塞主链路）
-        if: ${{ github.event.inputs.agentdock != 'disabled' }}
-        continue-on-error: true
-        timeout-minutes: 2
-        shell: pwsh
-        env:
-          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
-          RDP_USER: ${{ secrets.RDP_USERNAME }}
-          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
-          GUAC_PASS: ${{ secrets.GUAC_WEB_PASS }}
-          GUAC_IMAGE_BUNDLE: ${{ vars.GUAC_IMAGE_BUNDLE }}
-        run: |
-          $user = if ($env:RDP_USER) { $env:RDP_USER } else { 'rdpadmin' }
-          $pass = $env:RDP_PASS
-          if (-not $pass -and (Test-Path 'C:\agentdock-install\rdp-password.txt')) {
-            $pass = (Get-Content 'C:\agentdock-install\rdp-password.txt' -Raw).Trim()
-          }
-          if (-not $pass) { Write-Warning '拿不到 rdpadmin 密码，跳过网页端部署'; exit 0 }
-          $gp = if ($env:GUAC_PASS) { $env:GUAC_PASS } else { $pass }
-
-          $t0 = Get-Date
-          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/guac/guac-schedule.ps1 `
-            -RdpUser $user -RdpPass $pass -GuacPass $gp `
-            -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
-            -ImageBundle $env:GUAC_IMAGE_BUNDLE
-          Write-Host ("调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
-
-      # ----------------------------------------------------------------------
-      # 6.6 webtor 按需部署（默认关闭；仅当手机端勾选「启动云桌面时一并部署」）
-      # 与 6.5 同款套路：只注册一次性任务就返回，部署本体在后台跑，
-      # 完成/失败都会由 webtor-run.ps1 写状态并补推到手机端。
-      # ----------------------------------------------------------------------
-      - name: 6.6 webtor 后台部署（勾选才执行）
-        if: ${{ github.event.inputs.deploy_webtor == 'enabled' }}
-        continue-on-error: true
-        timeout-minutes: 2
-        shell: pwsh
-        env:
-          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
-          # 部署任务必须以 rdpadmin 身份注册：Ubuntu-24.04 的 WSL 注册在它的 HKCU 下，
-          # 用 runneradmin/S4U 跑会看不到发行版（2026-11-24 首次上线即因此失败）。
-          RDP_USER: ${{ secrets.RDP_USERNAME }}
-          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
-          # webtor 管理员密码；配了 secret 就以 secret 为准，未配时用交付默认值
-          WEBTOR_ADMIN_PW: ${{ secrets.WEBTOR_ADMIN_PW || '.PK.8682268' }}
-        run: |
-          $t0 = Get-Date
-          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/webtor/webtor-schedule.ps1 `
-            -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
-            -RunId $env:GITHUB_RUN_ID `
-            -RdpUser $env:RDP_USER -RdpPass $env:RDP_PASS -AdminPw $env:WEBTOR_ADMIN_PW
-          Write-Host ("webtor 调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
       # [v11] 路由守卫：EasyTier 的 TUN 会挂一条 metric 9005 的 0.0.0.0/0。
       # 托管 runner 的物理网卡 metric 每次开机都可能不同，一旦 TUN 胜出，到 GitHub /
       # Cloudflare 的流量就被吸进虚拟网卡形成回环 → 整机失联、所有服务起不来

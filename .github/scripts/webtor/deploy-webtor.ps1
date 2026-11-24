@@ -154,10 +154,15 @@ if ($needMove) {
 } else {
     Say '发行版已在 D 盘（或无法判定），跳过迁移'
     if ($cfgDirty) {
-        # 已装好的机器上改 .wslconfig 也要重启 WSL 才生效；容器 restart=always 会自己回来
-        Warn '.wslconfig 变更需重启 WSL 生效（容器约 20 秒后自动恢复）...'
-        wsl --shutdown
-        Start-Sleep -Seconds 8
+        # [v12 修复 — 提前调度带来的竞态]
+        # 原实现在这里 `wsl --shutdown` 让 .wslconfig 生效。但 3.5b 把本任务提前到
+        # 步骤 3 之后，此时 guac-bootstrap 很可能**正在同一个 WSL 里装 Docker / 拉镜像**，
+        # 关掉 VM 会直接打断它的下载，让 guac（甚至 webtor 自己）部署失败。
+        #
+        # 而且这次 shutdown 本来就不是必需的：vmIdleTimeout 在 WSL 3.0.5 上实测不生效
+        # （见上方 1.5 节注释），真正防止空闲关 VM 的是文件末尾注册的 WSL-KeepAlive
+        # 常驻会话（sleep infinity 钉住 VM）。所以只写文件、不重启，等下次冷启动自然生效。
+        Warn '.wslconfig 已写入，但为不打断并行的 guac 引导，本次不重启 WSL（保活由 WSL-KeepAlive 承担）'
     }
 }
 
