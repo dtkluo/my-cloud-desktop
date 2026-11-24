@@ -98,6 +98,14 @@ on:
           - quick
         required: false
         default: 'named'
+      deploy_webtor:
+        description: '启动云桌面时一并部署 webtor（WSL Docker 热部署，异步后台执行，不拖慢可连接时间）'
+        type: choice
+        options:
+          - disabled
+          - enabled
+        required: false
+        default: 'disabled'
 
 env:
   ET_VIRTUAL_IP: 192.168.110.88
@@ -432,6 +440,25 @@ jobs:
             -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
             -ImageBundle $env:GUAC_IMAGE_BUNDLE
           Write-Host ("调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
+
+      # ----------------------------------------------------------------------
+      # 6.6 webtor 按需部署（默认关闭；仅当手机端勾选「启动云桌面时一并部署」）
+      # 与 6.5 同款套路：只注册一次性任务就返回，部署本体在后台跑，
+      # 完成/失败都会由 webtor-run.ps1 写状态并补推到手机端。
+      # ----------------------------------------------------------------------
+      - name: 6.6 webtor 后台部署（勾选才执行）
+        if: ${{ github.event.inputs.deploy_webtor == 'enabled' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: pwsh
+        env:
+          STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+        run: |
+          $t0 = Get-Date
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/webtor/webtor-schedule.ps1 `
+            -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
+            -RunId $env:GITHUB_RUN_ID
+          Write-Host ("webtor 调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
       # ======================================================================
       # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 基线自检 -> 就绪校验 ->
       #   门户自检 -> 保活，单步骤持有 easytier-core，避免核心进程跨步骤被回收。
@@ -829,6 +856,15 @@ jobs:
                     -StateRepo $adRepo -StatePath $adPath @adArgs
               } catch {
                 Write-Warning "AgentDock 守护同步失败（不影响云桌面）：$($_.Exception.Message)"
+              }
+
+              # [按需命令] 手机端点「部署 webtor」会把命令写进同一个私有仓库；
+              # 这里每分钟查一次，命中才跑，而且用 run_id + request_id 双重去重。
+              try {
+                & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/webtor/webtor-command.ps1 `
+                    -StateRepo $adRepo -StatePath $adPath
+              } catch {
+                Write-Warning "webtor 命令轮询失败（不影响云桌面）：$($_.Exception.Message)"
               }
             }
 
