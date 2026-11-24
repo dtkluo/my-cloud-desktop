@@ -68,6 +68,17 @@ if ($needMove) {
     Say "$drive 可用 ${freeGB} GB，迁移预计需要 ${needGB} GB"
     if ($freeGB -lt $needGB) { Die "$drive 空间不足，无法迁移" }
 
+    # 迁移要 wsl --shutdown，而 Guacamole 的冷启动（6.5）几乎和本任务同时开始，
+    # 它可能正在同一个 WSL 里装 Docker / 拉镜像。此时强关 VM 会把下载打断
+    # （半个镜像层，下次 pull 得重来）。所以先尽力等 Docker 就绪再迁移，
+    # 最多等 8 分钟；拿不到也不阻塞，退回原来的直接迁移。
+    Say '迁移前等待 Docker 就绪（避免打断 Guacamole 冷启动）...'
+    for ($i = 0; $i -lt 160; $i++) {
+        $dv = (wsl -d $Distro -u root -- bash -lc "docker info --format '{{.ServerVersion}}' 2>/dev/null") -join ''
+        if ($dv -match '^\d') { Say "Docker 已就绪（$dv），继续迁移"; break }
+        Start-Sleep -Seconds 3
+    }
+
     Warn '发行版在系统盘，开始迁移到 D 盘（guacamole 会短暂中断）...'
     wsl --shutdown
     Start-Sleep -Seconds 8
