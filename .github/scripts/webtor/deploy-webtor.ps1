@@ -43,10 +43,27 @@ function Say($m)  { Write-Host "[webtor] $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "[webtor] $m" -ForegroundColor Yellow }
 function Die($m)  { Write-Host "[webtor] 失败: $m" -ForegroundColor Red; exit 1 }
 
-# ---------------------------------------------------------- 1. 发行版定位
+# ---------------------------------------------------------- 1. 发行版定位（等待就绪）
+# [2026-11-24 修复 — 开机竞态]
+# 开机勾选场景下，本任务固定 5 秒后执行，而 WSL 发行版由 Guacamole 引导异步安装
+# （实测 11:16:08 开始装、11:16:47 才 OK）。原实现是一次判定，于是在 11:16:15
+# 读到空列表直接 Die，状态写死成 failed —— 发行版其实 32 秒后就存在了。
+# 因此改为轮询等待（上限 15 分钟），把「谁先谁后」的不确定性吸收掉。
 Say "检查 WSL 发行版 $Distro ..."
-$distros = @(wsl --list --quiet 2>$null) -replace "`0", '' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-if ($distros -notcontains $Distro) { Die "没有名为 $Distro 的发行版。当前: $($distros -join ', ')" }
+$dsStart = Get-Date
+$dsIter  = 0
+$distros = @()
+while ($true) {
+    $distros = @(wsl.exe --list --quiet 2>$null) -replace "`0", '' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    if ($distros -contains $Distro) { break }
+    $el = [int]((Get-Date) - $dsStart).TotalSeconds
+    if ($el -ge 900) { Die "等待 15 分钟仍没有名为 $Distro 的发行版。当前: $($distros -join ', ')" }
+    if ($dsIter % 6 -eq 0) { Say "等待发行版安装完成 ${el}s（Guacamole 引导可能正在安装）..." }
+    $dsIter++
+    Start-Sleep -Seconds 5
+}
+$waited = [int]((Get-Date) - $dsStart).TotalSeconds
+if ($waited -ge 10) { Say "发行版就绪（等待了 ${waited}s）" }
 
 $basePath = $null
 foreach ($k in (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue)) {
@@ -92,15 +109,18 @@ if ($needMove) {
     Say "$drive 可用 ${freeGB} GB，迁移预计需要 ${needGB} GB"
     if ($freeGB -lt $needGB) { Die "$drive 空间不足，无法迁移" }
 
-    # 迁移要 wsl --shutdown，而 Guacamole 的冷启动（6.5）几乎和本任务同时开始，
-    # 它可能正在同一个 WSL 里装 Docker / 拉镜像。此时强关 VM 会把下载打断
-    # （半个镜像层，下次 pull 得重来）。所以先尽力等 Docker 就绪再迁移，
-    # 最多等 8 分钟；拿不到也不阻塞，退回原来的直接迁移。
-    Say '迁移前等待 Docker 就绪（避免打断 Guacamole 冷启动）...'
-    for ($i = 0; $i -lt 160; $i++) {
-        $dv = (wsl -d $Distro -u root -- bash -lc "docker info --format '{{.ServerVersion}}' 2>/dev/null") -join ''
-        if ($dv -match '^\d') { Say "Docker 已就绪（$dv），继续迁移"; break }
-        Start-Sleep -Seconds 3
+    # 迁移要 wsl --shutdown，而 Guacamole 的冷启动（6.5）与本任务同时开始：
+    # 它正在同一个 WSL 里装 Docker、拉镜像、起容器。此时强关 VM 会打断下载，
+    # 甚至让它的 compose 起不来。所以先等它把 'guac-bootstrap done' 标记写完，
+    # 最多等 12 分钟；机器上没有 Guacamole 引导日志则直接跳过这段等待。
+    $guacLog = 'C:\guac-auto\bootstrap.log'
+    if (Test-Path -LiteralPath $guacLog) {
+        Say '迁移前等待 Guacamole 引导结束（避免 wsl --shutdown 打断它的下载）...'
+        for ($i = 0; $i -lt 240; $i++) {
+            $gl = Get-Content -LiteralPath $guacLog -Raw -ErrorAction SilentlyContinue
+            if ($gl -match 'guac-bootstrap done') { Say 'Guacamole 引导已结束，继续迁移'; break }
+            Start-Sleep -Seconds 3
+        }
     }
 
     Warn '发行版在系统盘，开始迁移到 D 盘（guacamole 会短暂中断）...'
