@@ -28,7 +28,8 @@ param(
     [switch] $OnlyIfChanged,
     [string] $PiikStateFile = 'C:\piik-auto\piik.json',
     [string] $GuacStateFile = 'C:\guac-auto\guac.json',
-    [string] $BillddeskStateFile = 'C:\billddesk-auto\billddesk.json'
+    [string] $BillddeskStateFile = 'C:\billddesk-auto\billddesk.json',
+    [string] $WebtorStateFile = 'C:\webtor-auto\status.json'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -244,6 +245,26 @@ if ($BillddeskStateFile -and (Test-Path -LiteralPath $BillddeskStateFile)) {
     $bdMsg   = 'BilldDesk 未安装'
 }
 
+# ---------- webtor（WSL Docker 热部署，按需触发） ----------
+# 部署脚本异步产出 status.json，本脚本每次同步都带上它；state 从 building -> ready
+# 必须参与 OnlyIfChanged 比较，否则手机端会一直停在「部署中」。
+$wtState = 'off'; $wtUrl = ''; $wtMsg = ''; $wtReq = ''; $wtRun = ''; $wtAt = ''; $wtDetail = ''
+if ($WebtorStateFile -and (Test-Path -LiteralPath $WebtorStateFile)) {
+    try {
+        $wt = Get-Content -LiteralPath $WebtorStateFile -Raw | ConvertFrom-Json
+        $wtState  = if ($wt.state) { [string]$wt.state } else { 'unknown' }
+        $wtUrl    = [string]$wt.url
+        $wtMsg    = [string]$wt.message
+        $wtReq    = [string]$wt.request_id
+        $wtRun    = [string]$wt.run_id
+        $wtAt     = [string]$wt.updated_at
+        $wtDetail = [string]$wt.detail
+    } catch {
+        $wtState = 'failed'
+        $wtMsg   = 'webtor 状态文件解析失败：' + $_.Exception.Message
+    }
+}
+
 # Piik 已退役：只要 BilldDesk 在跑，就把 piik 段统一写成 retired，
 # 避免手机端读到 piik-auto 的残留状态而显示「分享中」。
 $piikStateOut = $piikState
@@ -323,6 +344,15 @@ $payload = [ordered]@{
         rdp_target = $guacTarget
         message    = $guacMsg
     }
+    webtor = [ordered]@{
+        state      = $wtState
+        url        = $wtUrl
+        message    = $wtMsg
+        request_id = $wtReq
+        run_id     = $wtRun
+        updated_at = $wtAt
+        detail     = $wtDetail
+    }
     prompt     = $prompt
 }
 
@@ -372,7 +402,11 @@ if ($OnlyIfChanged -and $null -ne $remoteJson) {
                  # guac 是从 building -> ready 异步跃迁的，必须参与比较，
                  # 否则 bootstrap 装完那次补推会被「其余字段未变」吞掉。
                  ($remoteJson.guac.state -eq $guacState) -and
-                 ($remoteJson.guac.url -eq $guacUrl)
+                 ($remoteJson.guac.url -eq $guacUrl) -and
+                 # webtor building -> ready/failed 是异步跃迁，必须参与比较
+                 ($remoteJson.webtor.state -eq $wtState) -and
+                 ($remoteJson.webtor.url -eq $wtUrl) -and
+                 ($remoteJson.webtor.request_id -eq $wtReq)
     if ($unchanged) {
         Write-Host '连接信息未发生变化，跳过提交。'
         exit 0
