@@ -29,7 +29,11 @@ param(
     [string]$Vip         = '192.168.110.88',
     [string]$AdminPw     = '',
     [string]$KitDir      = $PSScriptRoot,
-    [string]$Image       = 'ghcr.io/webtor-io/self-hosted:latest'
+    [string]$Image       = 'ghcr.io/webtor-io/self-hosted:latest',
+    # WebtorProxy 计划任务要用的身份。必须与「装了 WSL 发行版的账号」一致，
+    # 否则代理进程看不到 WSL（wsl --list 为空），端口转发起不来。
+    [string]$RdpUser     = '',
+    [string]$RdpPass     = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -195,13 +199,37 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
 $action    = New-ScheduledTaskAction -Execute $py -Argument 'C:\webtor\proxy.py' -WorkingDirectory 'C:\webtor'
-$principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\$env:USERNAME" -LogonType S4U -RunLevel Highest
 $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
                 -MultipleInstances IgnoreNew -RestartCount 3 `
                 -RestartInterval (New-TimeSpan -Minutes 1) `
                 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName 'WebtorProxy' -Action $action -Principal $principal `
-    -Settings $settings -Force | Out-Null
+
+# 代理进程必须跑在「装了 WSL 的那个账号」下：它要调 wsl.exe 把 8081 转进容器。
+# 之前用 S4U + $env:USERNAME，workflow 里就是 runneradmin —— 看不到 rdpadmin 的
+# Ubuntu-24.04，代理起来也是空的（页面 502）。这里优先用 rdpadmin + 密码。
+$proxyHost = [System.Net.Dns]::GetHostName()
+$proxyUser = if ($RdpUser) { "$proxyHost\$RdpUser" } else { "$proxyHost\$env:USERNAME" }
+$proxyOK = $false
+if ($RdpUser -and $RdpPass) {
+    try {
+        Register-ScheduledTask -TaskName 'WebtorProxy' -Action $action -Settings $settings `
+            -User $proxyUser -Password $RdpPass -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+        $proxyOK = $true
+    } catch { Warn "proxy 任务（password）注册失败: $($_.Exception.Message)" }
+}
+if (-not $proxyOK) {
+    try {
+        Register-ScheduledTask -TaskName 'WebtorProxy' -Action $action -Settings $settings `
+            -User $proxyUser -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+        $proxyOK = $true
+    } catch { Warn "proxy 任务（interactive）注册失败: $($_.Exception.Message)" }
+}
+if (-not $proxyOK) {
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\$env:USERNAME" -LogonType S4U -RunLevel Highest
+    Register-ScheduledTask -TaskName 'WebtorProxy' -Action $action -Principal $principal `
+        -Settings $settings -Force | Out-Null
+    Warn 'proxy 任务退回 S4U（看不到 WSL，端口转发很可能失败）'
+}
 Start-ScheduledTask -TaskName 'WebtorProxy'
 
 Remove-NetFirewallRule -DisplayName "Webtor $Port" -ErrorAction SilentlyContinue
