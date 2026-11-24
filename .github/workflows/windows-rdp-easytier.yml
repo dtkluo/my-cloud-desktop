@@ -453,11 +453,18 @@ jobs:
         shell: pwsh
         env:
           STATE_TOKEN: ${{ secrets.AGENTDOCK_GH_TOKEN }}
+          # 部署任务必须以 rdpadmin 身份注册：Ubuntu-24.04 的 WSL 注册在它的 HKCU 下，
+          # 用 runneradmin/S4U 跑会看不到发行版（2026-11-24 首次上线即因此失败）。
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          # webtor 管理员密码；配了 secret 就以 secret 为准，未配时用交付默认值
+          WEBTOR_ADMIN_PW: ${{ secrets.WEBTOR_ADMIN_PW || '.PK.8682268' }}
         run: |
           $t0 = Get-Date
           pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/webtor/webtor-schedule.ps1 `
             -StateRepo $env:AGENTDOCK_STATUS_REPO -StatePath $env:AGENTDOCK_STATUS_PATH `
-            -RunId $env:GITHUB_RUN_ID
+            -RunId $env:GITHUB_RUN_ID `
+            -RdpUser $env:RDP_USER -RdpPass $env:RDP_PASS -AdminPw $env:WEBTOR_ADMIN_PW
           Write-Host ("webtor 调度耗时 {0:N1}s（后台继续，不等待）" -f ((Get-Date) - $t0).TotalSeconds)
       # ======================================================================
       # [v6 关键] 本步骤一次性完成：防火墙 -> 启动 -> 基线自检 -> 就绪校验 ->
@@ -477,6 +484,9 @@ jobs:
           # 刻意不在此声明 AGENTDOCK_STATUS_*：顶层 env 已定义（含默认值），
           # step 级同名变量会用它（此处为空）覆盖顶层值，使默认值失效。
           RDP_USER: ${{ secrets.RDP_USERNAME }}
+          # 按需部署要用 rdpadmin 身份注册计划任务，密码必须传下去
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          WEBTOR_ADMIN_PW: ${{ secrets.WEBTOR_ADMIN_PW || '.PK.8682268' }}
         run: |
           $ErrorActionPreference = 'Continue'
           $ProgressPreference    = 'SilentlyContinue'
@@ -862,7 +872,8 @@ jobs:
               # 这里每分钟查一次，命中才跑，而且用 run_id + request_id 双重去重。
               try {
                 & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/webtor/webtor-command.ps1 `
-                    -StateRepo $adRepo -StatePath $adPath
+                    -StateRepo $adRepo -StatePath $adPath `
+                    -RdpUser $env:RDP_USER -RdpPass $env:RDP_PASS -AdminPw $env:WEBTOR_ADMIN_PW
               } catch {
                 Write-Warning "webtor 命令轮询失败（不影响云桌面）：$($_.Exception.Message)"
               }
