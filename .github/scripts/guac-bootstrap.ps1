@@ -18,6 +18,7 @@ param(
   [string]$WorkDir      = 'C:\guac-auto',
   [string]$DeploySh     = "$PSScriptRoot\guac\guac-deploy.sh",
   [string]$ImageBundle  = '',          # 可选：预导出的镜像包 URL（.tar.zst），命中则跳过 docker pull
+  [string]$WslTarget    = 'D:\WSL\Ubuntu-24.04',   # 发行版安家位置（磁盘宽裕盘）
   [switch]$SkipWslInstall
 )
 
@@ -42,6 +43,75 @@ if ($distros -notmatch [regex]::Escape($Distro)) {
   if ($distros -notmatch [regex]::Escape($Distro)) { Log "FATAL: distro install failed"; exit 1 }
 }
 Log "distro OK"
+
+# ---------- 1.5) 发行版安家到 D 盘（趁 vhdx 还小，务必在装 Docker 之前） ----------
+# wsl --install 只能装到 C 盘（%LOCALAPPDATA%\Packages\...），没有指定安装路径的参数，
+# 所以只能在装完后搬一次。搬运成本与 vhdx 大小成正比：
+#   刚装完 ≈ 1.2 GB；等 Guac 镜像 + webtor 镜像 + 卷落进来再搬 ≈ 4-5 GB。
+# 更要紧的是搬移必须 wsl --shutdown：会打断正在运行的容器，并让 cloudflared
+# 快速隧道换域名（guac.json 里还是旧域名 → 外网 530，2026-11-24 踩过）。
+# 在这里提前搬完，webtor 部署时读到的路径已在 D 盘，直接跳过迁移。
+$basePath = $null
+foreach ($k in (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue)) {
+  $p = Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue
+  if ($p.DistributionName -eq $Distro) { $basePath = $p.BasePath }
+}
+if (-not $basePath) {
+  Log "WARN: 读不到 Lxss 注册表，跳过迁移（由 webtor 部署兜底）"
+} elseif ($basePath -match '^[Dd]:') {
+  Log "distro already on $basePath"
+} else {
+  $drive = Split-Path -Qualifier $WslTarget
+  $disk  = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'" -ErrorAction SilentlyContinue
+  if (-not $disk) {
+    Log "WARN: $drive 不存在，跳过迁移（发行版留在 $basePath）"
+  } else {
+    $freeGB = [math]::Round($disk.FreeSpace / 1GB, 1)
+    if ($freeGB -lt 8) {
+      Log "WARN: $drive 可用 ${freeGB} GB，不足 8 GB，跳过迁移"
+    } else {
+      # --move 要求目标不存在
+      if (Test-Path -LiteralPath $WslTarget) {
+        $items = @(Get-ChildItem -LiteralPath $WslTarget -Force -ErrorAction SilentlyContinue)
+        if ($items.Count -eq 0) { Remove-Item -LiteralPath $WslTarget -Recurse -Force -ErrorAction SilentlyContinue }
+        else { $WslTarget = '{0}-{1}' -f $WslTarget, (Get-Date -Format 'HHmmss') }
+      }
+      New-Item -ItemType Directory -Force -Path (Split-Path $WslTarget -Parent) | Out-Null
+      Log "moving distro to $WslTarget (free ${freeGB} GB) ..."
+      & wsl.exe --terminate $Distro 2>&1 | Out-Null
+      Start-Sleep -Seconds 2
+      & wsl.exe --manage $Distro --move $WslTarget 2>&1 | Out-Null
+      $moveRc = $LASTEXITCODE
+      Start-Sleep -Seconds 2
+      $after = $null
+      foreach ($k in (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue)) {
+        $p = Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue
+        if ($p.DistributionName -eq $Distro) { $after = $p.BasePath }
+      }
+      if ($moveRc -eq 0 -and $after -match '^[Dd]:') { Log "distro moved -> $after" }
+      else { Log "WARN: move rc=$moveRc path=$after（仍在原处，由 webtor 部署兜底迁移）" }
+    }
+  }
+}
+
+# ---------- 1.6) 抑制 WSL 空闲关闭（写 rdpadmin 的 profile） ----------
+# WSL 按「调用 wsl 的那个用户」的 %USERPROFILE%\.wslconfig 读配置，而保活任务
+# 是以 rdpadmin 身份跑的，所以这里按 -RdpUser 拼路径，而不是 $env:USERPROFILE
+# （引导步骤跑在 runneradmin 下，写自己 profile 等于没写）。
+# 配置生效需要一次 WSL 重启，因此放在任何容器启动之前写，避免 later 再 shutdown。
+$cfgPath = Join-Path "C:\Users\$RdpUser" '.wslconfig'
+$cfgWant = "[wsl2]`r`nvmIdleTimeout=-1`r`n"
+$cfgNow  = if (Test-Path -LiteralPath $cfgPath) { Get-Content -LiteralPath $cfgPath -Raw } else { '' }
+$cfgNow  = [string]$cfgNow
+if ($cfgNow -notmatch 'vmIdleTimeout\s*=\s*-1') {
+  $merged = if ($cfgNow -match '\[wsl2\]') {
+    [regex]::Replace($cfgNow, '\[wsl2\]', "[wsl2]`r`nvmIdleTimeout=-1", 'IgnoreCase')
+  } else { $cfgNow.TrimEnd() + "`r`n" + $cfgWant }
+  [IO.File]::WriteAllText($cfgPath, $merged, (New-Object System.Text.UTF8Encoding($false)))
+  Log ".wslconfig written -> $cfgPath"
+} else {
+  Log ".wslconfig ok -> $cfgPath"
+}
 
 # ---------- 2) 防火墙：WSL -> 宿主 3389 ----------
 Remove-NetFirewallRule -DisplayName 'WSL-RDP-3389' -ErrorAction SilentlyContinue
