@@ -82,6 +82,7 @@ if ($basePath -and ($basePath -notmatch '^[Dd]:')) { $needMove = $true }
 # 这个文件是 per-user 的（rdpadmin 的 %USERPROFILE%），实例每次重建都会丢，所以放在部署里。
 $cfgPath  = Join-Path $env:USERPROFILE '.wslconfig'
 $cfgRaw   = if (Test-Path -LiteralPath $cfgPath) { Get-Content -LiteralPath $cfgPath -Raw } else { '' }
+$cfgRaw   = [string]$cfgRaw
 $cfgDirty = $false
 if ($cfgRaw -notmatch 'vmIdleTimeout\s*=\s*-1') {
     if ($cfgRaw -match 'vmIdleTimeout\s*=') {
