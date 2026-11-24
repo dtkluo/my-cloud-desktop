@@ -59,6 +59,30 @@ else { Say "当前位置: $basePath" }
 $needMove = $false
 if ($basePath -and ($basePath -notmatch '^[Dd]:')) { $needMove = $true }
 
+# ---------------------------------------------------------- 1.5 禁止 WSL 空闲关闭
+# WSL2 默认空闲约 60 秒就把整个虚拟机干掉：容器全停、8081/8080 端口消失，
+# 手机端就会看到间歇性 502（2026-11-24 实测过）。vmIdleTimeout=-1 关掉这个行为。
+# 这个文件是 per-user 的（rdpadmin 的 %USERPROFILE%），实例每次重建都会丢，所以放在部署里。
+$cfgPath  = Join-Path $env:USERPROFILE '.wslconfig'
+$cfgRaw   = if (Test-Path -LiteralPath $cfgPath) { Get-Content -LiteralPath $cfgPath -Raw } else { '' }
+$cfgDirty = $false
+if ($cfgRaw -notmatch 'vmIdleTimeout\s*=\s*-1') {
+    if ($cfgRaw -match 'vmIdleTimeout\s*=') {
+        $cfgNew = $cfgRaw -replace 'vmIdleTimeout\s*=\s*\S+', 'vmIdleTimeout=-1'
+    } elseif ($cfgRaw -match '\[wsl2\]') {
+        $cfgNew = $cfgRaw -replace '(\[wsl2\])', "`$1`r`nvmIdleTimeout=-1"
+    } elseif ($cfgRaw.Trim()) {
+        $cfgNew = $cfgRaw.TrimEnd() + "`r`n`r`n[wsl2]`r`nvmIdleTimeout=-1`r`n"
+    } else {
+        $cfgNew = "[wsl2]`r`nvmIdleTimeout=-1`r`n"
+    }
+    [IO.File]::WriteAllText($cfgPath, $cfgNew, (New-Object System.Text.UTF8Encoding($false)))
+    $cfgDirty = $true
+    Say '.wslconfig：已写入 vmIdleTimeout=-1（禁止空闲关虚拟机）'
+} else {
+    Say '.wslconfig：vmIdleTimeout=-1 已就绪'
+}
+
 if ($needMove) {
     $drive = (Split-Path -Qualifier $WslTarget)
     $freeGB = [math]::Round((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'").FreeSpace / 1GB, 1)
@@ -93,6 +117,12 @@ if ($needMove) {
     Say '迁移完成，数据此后全部落在 D 盘'
 } else {
     Say '发行版已在 D 盘（或无法判定），跳过迁移'
+    if ($cfgDirty) {
+        # 已装好的机器上改 .wslconfig 也要重启 WSL 才生效；容器 restart=always 会自己回来
+        Warn '.wslconfig 变更需重启 WSL 生效（容器约 20 秒后自动恢复）...'
+        wsl --shutdown
+        Start-Sleep -Seconds 8
+    }
 }
 
 # ---------------------------------------------------------- 2. Docker 就绪
@@ -242,6 +272,48 @@ if (-not $proxyOK) {
     Warn 'proxy 任务退回 S4U（看不到 WSL，端口转发很可能失败）'
 }
 Start-ScheduledTask -TaskName 'WebtorProxy'
+
+# ---------------------------------------------------------- 6.5 WSL 常驻保活
+# WSL2 在没人用时会把整台虚拟机关掉（默认约 60 秒），容器随之全停、端口消失，
+# 外部看到的就是间歇性 502。vmIdleTimeout=-1 在新版 WSL（3.0.5）上实测不生效，
+# 可靠做法是留一个常驻会话把 VM 钉住：`wsl ... -- sleep infinity` 永不退出。
+# 这一个任务同时保住 guacd 和 webtor，比两套各自保活更省。
+Say '注册 WSL 常驻保活任务 ...'
+$kaName = 'WSL-KeepAlive'
+Unregister-ScheduledTask -TaskName $kaName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+$wslExe = @("$env:ProgramFiles\WSL\wsl.exe", "$env:SystemRoot\System32\wsl.exe") |
+          Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($wslExe) {
+    $kaAct = New-ScheduledTaskAction -Execute $wslExe -Argument "-d $Distro -u root -- sleep infinity"
+    $kaSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    $kaUser = if ($RdpUser) { "$proxyHost\$RdpUser" } else { "$proxyHost\$env:USERNAME" }
+    $kaOK = $false
+    if ($RdpUser -and $RdpPass) {
+        try {
+            Register-ScheduledTask -TaskName $kaName -Action $kaAct -Settings $kaSet `
+                -User $kaUser -Password $RdpPass -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+            $kaOK = $true
+        } catch { Warn "WSL 保活任务（password）注册失败: $($_.Exception.Message)" }
+    }
+    if (-not $kaOK) {
+        try {
+            $kaPr = New-ScheduledTaskPrincipal -UserId $kaUser -LogonType S4U -RunLevel Highest
+            Register-ScheduledTask -TaskName $kaName -Action $kaAct -Settings $kaSet `
+                -Principal $kaPr -Force -ErrorAction Stop | Out-Null
+            $kaOK = $true
+        } catch { Warn "WSL 保活任务（S4U）注册失败: $($_.Exception.Message)" }
+    }
+    if ($kaOK) {
+        try { Start-ScheduledTask -TaskName $kaName } catch { Warn "WSL 保活任务启动失败: $($_.Exception.Message)" }
+        Say 'WSL 常驻保活已启动（防止空闲关 VM 导致 502）'
+    } else {
+        Warn 'WSL 保活未注册：长时间不访问后可能需要先唤醒再打开页面'
+    }
+} else {
+    Warn '找不到 wsl.exe，跳过 WSL 保活'
+}
 
 Remove-NetFirewallRule -DisplayName "Webtor $Port" -ErrorAction SilentlyContinue
 New-NetFirewallRule -DisplayName "Webtor $Port" -Direction Inbound -Action Allow `
