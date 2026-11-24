@@ -124,18 +124,33 @@ if ($needMove) {
         }
     }
 
-    Warn '发行版在系统盘，开始迁移到 D 盘（guacamole 会短暂中断）...'
-    wsl --shutdown
-    Start-Sleep -Seconds 8
-    if (Test-Path -LiteralPath $WslTarget) {
-        if ((Get-ChildItem -LiteralPath $WslTarget -Force -ErrorAction SilentlyContinue).Count -gt 0) {
-            Die "$WslTarget 非空，请先清空或改用 -WslTarget"
-        }
+    # [v11] 关键：等待期间 Guacamole 的引导**也会**把发行版搬到 D 盘（它装完发行版、
+    # 装 Docker 之前就先搬一次）。所以必须在这里重新读一次注册表，
+    # 否则会拿着等待前的旧判定（C 盘）去搬，撞上"目标非空"直接失败。
+    # 2026-11-24 21:21 实证：等待前读到 C，等完 guac 已搬到 D:\WSL\Ubuntu-24.04，
+    # webtor 仍去迁移 → "D:\WSL\Ubuntu-24.04 非空" → 整个部署 rc=1。
+    $basePath2 = $null
+    foreach ($k in (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue)) {
+        $p2 = Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue
+        if ($p2.DistributionName -eq $Distro) { $basePath2 = $p2.BasePath }
     }
-    New-Item -ItemType Directory -Path (Split-Path $WslTarget -Parent) -Force | Out-Null
-    wsl --manage $Distro --move $WslTarget
-    if ($LASTEXITCODE -ne 0) { Die "迁移失败 rc=$LASTEXITCODE" }
-    Say '迁移完成，数据此后全部落在 D 盘'
+    if ($basePath2 -and ($basePath2 -match '^[Dd]:')) {
+        Say "等待期间发行版已由 Guacamole 迁到 D 盘：$basePath2，跳过迁移"
+        $basePath = $basePath2
+    } else {
+        Warn '发行版在系统盘，开始迁移到 D 盘（guacamole 会短暂中断）...'
+        wsl --shutdown
+        Start-Sleep -Seconds 8
+        if (Test-Path -LiteralPath $WslTarget) {
+            if ((Get-ChildItem -LiteralPath $WslTarget -Force -ErrorAction SilentlyContinue).Count -gt 0) {
+                Die "$WslTarget 非空，请先清空或改用 -WslTarget"
+            }
+        }
+        New-Item -ItemType Directory -Path (Split-Path $WslTarget -Parent) -Force | Out-Null
+        wsl --manage $Distro --move $WslTarget
+        if ($LASTEXITCODE -ne 0) { Die "迁移失败 rc=$LASTEXITCODE" }
+        Say '迁移完成，数据此后全部落在 D 盘'
+    }
 } else {
     Say '发行版已在 D 盘（或无法判定），跳过迁移'
     if ($cfgDirty) {
