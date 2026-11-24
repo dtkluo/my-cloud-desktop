@@ -78,10 +78,26 @@ if (-not $basePath) {
       }
       New-Item -ItemType Directory -Force -Path (Split-Path $WslTarget -Parent) | Out-Null
       Log "moving distro to $WslTarget (free ${freeGB} GB) ..."
-      & wsl.exe --terminate $Distro 2>&1 | Out-Null
-      Start-Sleep -Seconds 2
-      & wsl.exe --manage $Distro --move $WslTarget 2>&1 | Out-Null
-      $moveRc = $LASTEXITCODE
+      # [2026-11-24 实测] 只做 wsl --terminate 是不够的：发行版停了但 wslservice/VM
+      # 还在，`wsl --manage --move` 直接返回 rc=-1（引导日志 11:55:02 实证）。
+      # 必须整机 wsl --shutdown；此刻 Docker 还没装，关 VM 没有任何副作用
+      # （这正是"提前搬"的意义，晚搬就要打断容器和隧道）。
+      & wsl.exe --shutdown 2>&1 | Out-Null
+      Start-Sleep -Seconds 6
+      $moveRc = -1
+      for ($try = 1; $try -le 2; $try++) {
+        & wsl.exe --manage $Distro --move $WslTarget 2>&1 | Out-Null
+        $moveRc = $LASTEXITCODE
+        if ($moveRc -eq 0) { break }
+        Log "MOVE_FAILED try=$try rc=$moveRc"
+        # 失败尝试可能留下空目录，清掉再重试
+        if (Test-Path -LiteralPath $WslTarget) {
+          $left = @(Get-ChildItem -LiteralPath $WslTarget -Force -ErrorAction SilentlyContinue)
+          if ($left.Count -eq 0) { Remove-Item -LiteralPath $WslTarget -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        & wsl.exe --shutdown 2>&1 | Out-Null
+        Start-Sleep -Seconds 5
+      }
       Start-Sleep -Seconds 2
       $after = $null
       foreach ($k in (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue)) {
