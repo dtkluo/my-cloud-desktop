@@ -18,11 +18,19 @@ param(
     [string] $StateRepo    = 'dtkluo/agentdock-v2',
     [string] $CommandPath  = 'runtime/commands/webtor.json',
     [string] $StatePath    = 'runtime/cloud-desktop.json',
-    [string] $WorkDir      = 'C:\webtor-auto'
+    [string] $WorkDir      = 'C:\webtor-auto',
+    [string] $RdpUser      = '',
+    [string] $RdpPass      = '',
+    [string] $AdminPw      = '',
+    [int]    $Port         = 8081
 )
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
+
+if (-not $RdpUser) { $RdpUser = if ($env:RDP_USER) { $env:RDP_USER } else { 'rdpadmin' } }
+if (-not $RdpPass) { $RdpPass = [string]$env:RDP_PASS }
+if (-not $AdminPw) { $AdminPw = [string]$env:WEBTOR_ADMIN_PW }
 
 if ([string]::IsNullOrWhiteSpace($env:STATE_TOKEN)) { exit 0 }
 $runId = [string]$env:GITHUB_RUN_ID
@@ -71,15 +79,16 @@ if ($last -eq $requestId) { return }
 # 先落去重标记，再拉起部署：即便下面的 Start-Process 失败，也不会一分钟后重复拉
 [IO.File]::WriteAllText($lastFile, $requestId, (New-Object System.Text.UTF8Encoding($false)))
 
-$runner = Join-Path $PSScriptRoot 'webtor-run.ps1'
-$pwsh   = (Get-Process -Id $PID).Path
-Write-Host "收到 webtor 部署命令 $requestId，后台执行"
-Start-Process -FilePath $pwsh -ArgumentList @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-    '-File', "`"$runner`"",
-    '-WorkDir', "`"$WorkDir`"",
-    '-RequestId', "`"$requestId`"",
-    '-RunId', "`"$runId`"",
-    '-StateRepo', "`"$StateRepo`"",
-    '-StatePath', "`"$StatePath`""
-) | Out-Null
+# 必须走计划任务，不能 Start-Process：保活 step 跑在 runneradmin 下，Start-Process
+# 拉起的子进程同样是 runneradmin —— 而 WSL 发行版注册在 rdpadmin 的 HKCU 里，
+# 那样部署会直接报「没有名为 Ubuntu-24.04 的发行版」。webtor-schedule.ps1 会用
+# -RdpUser/-RdpPass 注册任务，身份才对；同时它也是 <3 秒返回，不阻塞保活循环。
+$sched = Join-Path $PSScriptRoot 'webtor-schedule.ps1'
+if (-not (Test-Path -LiteralPath $sched)) {
+    Write-Warning "缺少 $sched，无法执行部署"
+    return
+}
+Write-Host "收到 webtor 部署命令 $requestId，注册后台任务"
+& $sched -WorkDir $WorkDir -RequestId $requestId -RunId $runId `
+    -StateRepo $StateRepo -StatePath $StatePath `
+    -RdpUser $RdpUser -RdpPass $RdpPass -AdminPw $AdminPw -Port $Port
