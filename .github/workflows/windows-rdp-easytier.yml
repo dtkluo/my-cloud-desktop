@@ -756,6 +756,9 @@ jobs:
             exit 1
           }
 
+          # D1. 中继路径预热（run#224：对端→VIP 曾有约 13 分钟抖动）
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/easytier-warmup.ps1 -CliPath $cliPath -SelfVip $vip
+
           # 稳定性复检：确认核心不会在启动后短时间内自行退出
           Write-Host ""
           Write-Host "===== D. 稳定性复检（等待 15 秒）====="
@@ -857,8 +860,9 @@ jobs:
               Send-Heartbeat 'core_restarted'
             }
 
-            # 每 5 分钟一次轻量采样 + 外部心跳（v8；HEARTBEAT_URL 未配置时自动跳过）
+            # 每 5 分钟一次中继预热 + 轻量采样 + 外部心跳
             if ($i % 5 -eq 0) {
+              & pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/easytier-warmup.ps1 -CliPath $cliPath -SelfVip $vip -Rounds 1 -Quiet
               $peers     = Get-EtPeerCount -CliPath $cliPath
               $listenNow = @(Get-NetTCPConnection -LocalPort $socks5Port -State Listen -ErrorAction SilentlyContinue).Count
               Write-Host ("[{0}/{1}] 已运行 {2} 分钟｜节点数：{3}｜SOCKS5({4}) Listen：{5}｜重启：{6}" -f $i, $totalMinutes, $elapsed, $peers, $socks5Port, $listenNow, $restarts)
